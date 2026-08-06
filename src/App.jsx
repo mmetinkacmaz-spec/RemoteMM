@@ -3,20 +3,24 @@ import {
   Monitor, Shield, Terminal, Folder, MessageSquare, Cpu, Power,
   Lock, Eye, Camera, Disc, RefreshCw, Server, Wifi, Play, Search,
   Settings, ChevronRight, ChevronDown, Key, Download, Upload, Trash2,
-  X, Check, AlertTriangle, Send, Activity, User, HardDrive, Plus, Zap, Edit3
+  X, Check, AlertTriangle, Send, Activity, User, HardDrive, Plus, Zap, Edit3, AlertCircle
 } from 'lucide-react';
+
+// LocalStorage key for persistence
+const LOCAL_STORAGE_KEY = 'dameware_saved_hosts_v1';
 
 export default function App() {
   // Connection state
-  const [targetHost, setTargetHost] = useState('MAKINE1');
+  const [targetHost, setTargetHost] = useState('');
   const [targetPort, setTargetPort] = useState('6129');
-  const [authDomain, setAuthDomain] = useState('CORP');
+  const [authDomain, setAuthDomain] = useState('WORKGROUP');
   const [username, setUsername] = useState('Administrator');
   const [password, setPassword] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
 
-  // Deployment Toast state
+  // Error State
+  const [connectionError, setConnectionError] = useState(null);
   const [deployStatus, setDeployStatus] = useState(null);
 
   // Active Session State
@@ -36,31 +40,42 @@ export default function App() {
   // Active Modals
   const [activeModal, setActiveModal] = useState(null);
 
-  // Host Directory Tree
-  const [savedHosts, setSavedHosts] = useState([
-    {
-      domain: 'MY VIRTUAL MACHINES (Sanal Sunucularım)',
-      hosts: [
-        { id: 1, name: 'MAKINE1 (Hyper-V Server)', ip: 'MAKINE1', port: '6129', domain: 'WORKGROUP', user: 'Makine', pass: '', status: 'ONLINE', os: 'Win 11 Pro' },
-        { id: 2, name: 'DC-SRV-2024', ip: '127.0.0.1', port: '6129', domain: 'CORP', user: 'Administrator', pass: '', status: 'ONLINE', os: 'Win Server 2022' }
-      ]
-    },
-    {
-      domain: 'CORP.LOCAL (Enterprise Domain)',
-      hosts: [
-        { id: 3, name: 'FINANCE-PC01', ip: '192.168.1.105', port: '6129', domain: 'CORP', user: 'FinanceAdmin', pass: '', status: 'ONLINE', os: 'Win 11 Pro' },
-        { id: 4, name: 'EXEC-LAPTOP03', ip: '192.168.1.112', port: '6129', domain: 'CORP', user: 'ExecUser', pass: '', status: 'BUSY', os: 'Win 11 Ent' },
-        { id: 5, name: 'SQL-CLUSTER01', ip: '192.168.1.200', port: '6129', domain: 'CORP', user: 'sqladmin', pass: '', status: 'OFFLINE', os: 'Win Server 2019' }
-      ]
-    }
-  ]);
+  // Mouse Holding / Dragging state
+  const isMousePressedRef = useRef(false);
 
-  // Host Settings Editing State
+  // Persistent Host Directory State
+  const [savedHosts, setSavedHosts] = useState(() => {
+    try {
+      const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch (e) {}
+    // Clean default list without dummy hosts
+    return [
+      {
+        domain: 'KAYITLI SUNUCULARIM (My Saved Hosts)',
+        hosts: [
+          { id: 1, name: 'MAKINE1 (Sanal Sunucu)', ip: 'MAKINE1', port: '6129', domain: 'WORKGROUP', user: 'Makine', pass: '', status: 'ONLINE', os: 'Windows 11 Pro' }
+        ]
+      }
+    ];
+  });
+
+  // Save hosts to localStorage whenever savedHosts changes
+  useEffect(() => {
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(savedHosts));
+    } catch (e) {}
+  }, [savedHosts]);
+
+  // Editing / New Host Form States
   const [editingHost, setEditingHost] = useState(null);
-
-  // New Host Form State
   const [newHostName, setNewHostName] = useState('');
   const [newHostIp, setNewHostIp] = useState('');
+  const [newHostUser, setNewHostUser] = useState('Administrator');
+  const [newHostPass, setNewHostPass] = useState('');
+  const [newHostDomain, setNewHostDomain] = useState('WORKGROUP');
   const [newHostOs, setNewHostOs] = useState('Windows 11 Pro');
 
   // Subnet Scanner State
@@ -78,18 +93,11 @@ export default function App() {
   const [remotePath, setRemotePath] = useState('C:\\');
   const [remoteFiles, setRemoteFiles] = useState([
     { name: 'Program Files', isDirectory: true, size: 0, modified: '2026-08-01' },
-    { name: 'Windows', isDirectory: true, size: 0, modified: '2026-08-01' },
-    { name: 'Users', isDirectory: true, size: 0, modified: '2026-08-02' },
-    { name: 'DameWare_Agent.exe', isDirectory: false, size: 1450200, modified: '2026-08-05' },
-    { name: 'system_audit.log', isDirectory: false, size: 84200, modified: '2026-08-05' }
+    { name: 'Windows', isDirectory: true, size: 0, modified: '2026-08-01' }
   ]);
 
-  // Task Manager State
   const [processes, setProcesses] = useState([
-    { Id: 1024, ProcessName: 'DWRCS.exe', CPU: '1.2', WorkingSet64: 34500000 },
-    { Id: 408, ProcessName: 'svchost.exe', CPU: '0.4', WorkingSet64: 82100000 },
-    { Id: 2190, ProcessName: 'explorer.exe', CPU: '2.1', WorkingSet64: 124000000 },
-    { Id: 512, ProcessName: 'lsass.exe', CPU: '0.1', WorkingSet64: 21000000 }
+    { Id: 1024, ProcessName: 'DWRCS.exe', CPU: '1.2', WorkingSet64: 34500000 }
   ]);
 
   const socketRef = useRef(null);
@@ -104,7 +112,7 @@ export default function App() {
     if (hostObj) {
       target = hostObj.ip || hostObj.name;
       p = hostObj.port || '6129';
-      d = hostObj.domain || 'CORP';
+      d = hostObj.domain || 'WORKGROUP';
       u = hostObj.user || 'Administrator';
       pass = hostObj.pass || '';
 
@@ -115,8 +123,13 @@ export default function App() {
       setPassword(pass);
     }
 
+    if (!target.trim()) return;
+
     setIsConnecting(true);
+    setConnectionError(null);
     setDeployStatus(null);
+    setFrameSrc(null);
+    setFrameSvg(null);
 
     const wsUrl = `ws://localhost:3001/?host=${target}&port=${p}&domain=${encodeURIComponent(d)}&username=${encodeURIComponent(u)}&password=${encodeURIComponent(pass)}`;
     const ws = new WebSocket(wsUrl);
@@ -129,13 +142,18 @@ export default function App() {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'DEPLOYMENT_PROGRESS') {
+        if (data.type === 'CONNECTION_ERROR') {
+          setIsConnecting(false);
+          setIsConnected(false);
+          setConnectionError({ code: data.errorCode, message: data.errorMessage });
+        } else if (data.type === 'DEPLOYMENT_PROGRESS') {
           setDeployStatus(data.message);
         } else if (data.type === 'HANDSHAKE_ACK') {
           setIsConnecting(false);
           setIsConnected(true);
           setAgentInfo(data);
           setDeployStatus(null);
+          setConnectionError(null);
         } else if (data.type === 'SCREEN_FRAME') {
           if (data.frame) {
             setFrameSrc(`data:image/jpeg;base64,${data.frame}`);
@@ -153,11 +171,14 @@ export default function App() {
     ws.onclose = () => {
       setIsConnected(false);
       setIsConnecting(false);
-      setAgentInfo(null);
     };
 
     ws.onerror = () => {
       setIsConnecting(false);
+      setConnectionError({
+        code: 'ERR_GATEWAY_OFFLINE',
+        message: `Console Gateway service is unreachable on port 3001.`
+      });
     };
   };
 
@@ -167,6 +188,8 @@ export default function App() {
     }
     setIsConnected(false);
     setAgentInfo(null);
+    setFrameSrc(null);
+    setFrameSvg(null);
   };
 
   const handleOpenEditHost = (host) => {
@@ -189,28 +212,47 @@ export default function App() {
     setEditingHost(null);
   };
 
+  const handleDeleteHost = (hostId) => {
+    setSavedHosts(prev => {
+      return prev.map(group => ({
+        ...group,
+        hosts: group.hosts.filter(h => h.id !== hostId)
+      }));
+    });
+    setActiveModal(null);
+    setEditingHost(null);
+  };
+
   const handleAddHost = (e) => {
     e.preventDefault();
     if (!newHostName.trim() || !newHostIp.trim()) return;
 
+    const newEntry = {
+      id: Date.now(),
+      name: newHostName,
+      ip: newHostIp,
+      port: '6129',
+      domain: newHostDomain || 'WORKGROUP',
+      user: newHostUser || 'Administrator',
+      pass: newHostPass || '',
+      status: 'ONLINE',
+      os: newHostOs
+    };
+
     setSavedHosts(prev => {
       const updated = [...prev];
-      updated[0].hosts.unshift({
-        id: Date.now(),
-        name: newHostName,
-        ip: newHostIp,
-        port: '6129',
-        domain: authDomain || 'WORKGROUP',
-        user: username || 'Administrator',
-        pass: password || '',
-        status: 'ONLINE',
-        os: newHostOs
-      });
+      if (updated.length === 0) {
+        updated.push({ domain: 'KAYITLI SUNUCULARIM (My Saved Hosts)', hosts: [newEntry] });
+      } else {
+        updated[0].hosts.unshift(newEntry);
+      }
       return updated;
     });
 
     setNewHostName('');
     setNewHostIp('');
+    setNewHostUser('Administrator');
+    setNewHostPass('');
     setActiveModal(null);
   };
 
@@ -228,6 +270,22 @@ export default function App() {
         xPercent,
         yPercent
       }));
+    }
+  };
+
+  const handleMouseDown = (e) => {
+    isMousePressedRef.current = true;
+    sendMouseInput('mousedown', e);
+  };
+
+  const handleMouseUp = (e) => {
+    isMousePressedRef.current = false;
+    sendMouseInput('mouseup', e);
+  };
+
+  const handleMouseMove = (e) => {
+    if (isMousePressedRef.current) {
+      sendMouseInput('move', e);
     }
   };
 
@@ -269,8 +327,6 @@ export default function App() {
         type: 'CHAT_MESSAGE',
         text: chatInput
       }));
-    } else {
-      setChatMessages(prev => [...prev, { sender: 'Technician', text: chatInput, time: new Date().toLocaleTimeString() }]);
     }
     setChatInput('');
   };
@@ -281,10 +337,7 @@ export default function App() {
     setTimeout(() => {
       setScanResults([
         { ip: `${scanSubnet}.1`, host: 'ROUTER-GW', port6129: false },
-        { ip: `${scanSubnet}.10`, host: 'DC-SRV-2024', port6129: true, agentVersion: '12.2' },
-        { ip: `${scanSubnet}.105`, host: 'FINANCE-PC01', port6129: true, agentVersion: '12.2' },
-        { ip: `${scanSubnet}.112`, host: 'EXEC-LAPTOP03', port6129: true, agentVersion: '12.1' },
-        { ip: `${scanSubnet}.140`, host: 'DEV-MACHINE-04', port6129: false }
+        { ip: `${scanSubnet}.10`, host: 'DC-SRV-2024', port6129: true, agentVersion: '12.2' }
       ]);
       setIsScanning(false);
     }, 1500);
@@ -304,7 +357,7 @@ export default function App() {
               DameWare Mini Remote Control <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono">v12.2 Enterprise</span>
             </h1>
             <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
-              <Shield className="w-3 h-3 text-emerald-400" /> Host Credentials & Direct 1-Click Connect Configured
+              <Shield className="w-3 h-3 text-emerald-400" /> Persistent Storage (LocalStorage) Active
             </p>
           </div>
         </div>
@@ -511,7 +564,7 @@ export default function App() {
               </div>
 
               <button
-                disabled={isConnecting}
+                disabled={isConnecting || !targetHost.trim()}
                 onClick={() => handleConnect()}
                 className="w-full mt-2 py-2 rounded bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-medium flex items-center justify-center gap-2 transition shadow-lg shadow-sky-600/20"
               >
@@ -544,58 +597,67 @@ export default function App() {
               </div>
             </div>
 
-            <div className="space-y-3">
-              {savedHosts.map((group, idx) => (
-                <div key={idx} className="space-y-1">
-                  <div className="text-[11px] font-medium text-slate-400 flex items-center gap-1">
-                    <ChevronDown className="w-3 h-3" /> {group.domain}
-                  </div>
-                  <div className="pl-2 space-y-1 border-l border-slate-800">
-                    {group.hosts.map((h, i) => (
-                      <div
-                        key={i}
-                        className="group flex items-center justify-between p-2 rounded hover:bg-slate-800/80 transition border border-transparent hover:border-slate-700/50"
-                      >
-                        <div className="flex items-center gap-2 cursor-pointer flex-1" onClick={() => handleConnect(h)}>
-                          <div className={`w-2 h-2 rounded-full ${
-                            h.status === 'ONLINE' ? 'bg-emerald-400' : h.status === 'BUSY' ? 'bg-amber-400' : 'bg-slate-600'
-                          }`}></div>
-                          <div>
-                            <div className="text-xs font-medium text-slate-200 group-hover:text-sky-400 transition flex items-center gap-1.5">
-                              {h.name}
+            {savedHosts.length === 0 || savedHosts.every(g => g.hosts.length === 0) ? (
+              <div className="text-center text-slate-500 text-xs py-8 border border-dashed border-slate-800 rounded p-4">
+                <Server className="w-8 h-8 mx-auto text-slate-700 mb-2" />
+                Henüz kayıtlı sunucunuz yok.<br />
+                <button onClick={() => setActiveModal('addHost')} className="text-sky-400 hover:underline font-medium mt-1 inline-block">
+                  + Yeni Sunucu Ekle
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {savedHosts.map((group, idx) => (
+                  <div key={idx} className="space-y-1">
+                    <div className="text-[11px] font-medium text-slate-400 flex items-center gap-1">
+                      <ChevronDown className="w-3 h-3" /> {group.domain}
+                    </div>
+                    <div className="pl-2 space-y-1 border-l border-slate-800">
+                      {group.hosts.map((h, i) => (
+                        <div
+                          key={h.id || i}
+                          className="group flex items-center justify-between p-2 rounded hover:bg-slate-800/80 transition border border-transparent hover:border-slate-700/50"
+                        >
+                          <div className="flex items-center gap-2 cursor-pointer flex-1" onClick={() => handleConnect(h)}>
+                            <div className={`w-2 h-2 rounded-full ${
+                              h.status === 'ONLINE' ? 'bg-emerald-400' : h.status === 'BUSY' ? 'bg-amber-400' : 'bg-slate-600'
+                            }`}></div>
+                            <div>
+                              <div className="text-xs font-medium text-slate-200 group-hover:text-sky-400 transition flex items-center gap-1.5">
+                                {h.name}
+                              </div>
+                              <div className="text-[10px] text-slate-500 font-mono">{h.ip} • {h.user || 'Admin'}</div>
                             </div>
-                            <div className="text-[10px] text-slate-500 font-mono">{h.ip} • {h.user || 'Admin'}</div>
+                          </div>
+
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => handleOpenEditHost(h)}
+                              className="p-1.5 rounded hover:bg-slate-700 text-slate-400 hover:text-amber-400 transition"
+                              title="Configure Admin User & Host Credentials"
+                            >
+                              <Settings className="w-3.5 h-3.5" />
+                            </button>
+
+                            <button
+                              onClick={() => handleConnect(h)}
+                              className="px-2 py-1 rounded bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/30 text-[10px] font-medium flex items-center gap-1 transition"
+                              title="1-Click Direct Connect"
+                            >
+                              <Zap className="w-3 h-3 fill-current" /> 1-Click
+                            </button>
                           </div>
                         </div>
-
-                        {/* HOST SETTINGS ⚙️ & 1-CLICK CONNECT BUTTONS */}
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => handleOpenEditHost(h)}
-                            className="p-1.5 rounded hover:bg-slate-700 text-slate-400 hover:text-amber-400 transition"
-                            title="Configure Admin User & Host Credentials"
-                          >
-                            <Settings className="w-3.5 h-3.5" />
-                          </button>
-
-                          <button
-                            onClick={() => handleConnect(h)}
-                            className="px-2 py-1 rounded bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/30 text-[10px] font-medium flex items-center gap-1 transition"
-                            title="1-Click Direct Connect"
-                          >
-                            <Zap className="w-3 h-3 fill-current" /> 1-Click
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="p-2 border-t border-slate-800 bg-slate-950/60 text-[10px] text-slate-500 flex justify-between">
-            <span>Saved Credentials: Encrypted</span>
+            <span>Persistent Storage: Active</span>
             <span>Port: 6129</span>
           </div>
         </aside>
@@ -651,15 +713,16 @@ export default function App() {
             </div>
           </div>
 
-          {/* CANVAS DISPLAY AREA WITH MOUSE MOVE & CLICK BINDINGS */}
+          {/* CANVAS DISPLAY AREA */}
           <div className="flex-1 relative flex items-center justify-center overflow-auto p-2">
             {isConnected ? (
               <div
                 className={`relative border border-slate-800 rounded shadow-2xl overflow-hidden cursor-crosshair ${
                   scaleMode === 'fit' ? 'max-w-full max-h-full aspect-video' : ''
                 }`}
-                onMouseMove={(e) => sendMouseInput('move', e)}
-                onClick={(e) => sendMouseInput('click', e)}
+                onMouseDown={handleMouseDown}
+                onMouseUp={handleMouseUp}
+                onMouseMove={handleMouseMove}
                 onContextMenu={(e) => { e.preventDefault(); sendMouseInput('click', e); }}
               >
                 {frameSrc && (
@@ -684,6 +747,32 @@ export default function App() {
                   </div>
                 )}
               </div>
+            ) : connectionError ? (
+              /* REAL CONNECTION ERROR PANEL */
+              <div className="flex flex-col items-center justify-center text-rose-400 p-8 text-center max-w-lg glass-panel rounded-2xl border border-rose-500/30 shadow-2xl">
+                <div className="w-16 h-16 rounded-full bg-rose-500/10 border border-rose-500/30 flex items-center justify-center mb-4 text-rose-400">
+                  <AlertCircle className="w-8 h-8" />
+                </div>
+                <div className="text-[11px] font-mono px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold mb-2">
+                  ERROR CODE: {connectionError.code}
+                </div>
+                <h3 className="text-base font-bold text-slate-100">Bağlantı Kurulamadı!</h3>
+                <p className="text-xs text-slate-300 mt-2 leading-relaxed">
+                  {connectionError.message}
+                </p>
+                <div className="mt-4 p-3 bg-slate-950 rounded-lg border border-slate-800 text-left text-[11px] text-slate-400 space-y-1 w-full font-mono">
+                  <div className="text-slate-300 font-bold mb-1">Kontrol Edilmesi Gerekenler:</div>
+                  <div>1. Sanal sunucunuzda <strong className="text-sky-400">DameWare_Agent.exe</strong> çalışıyor mu?</div>
+                  <div>2. Port <strong className="text-amber-400">6129</strong> Güvenlik Duvarı'nda açık mı?</div>
+                  <div>3. IP adresi veya Makine Adı (<strong className="text-emerald-400">{targetHost}</strong>) doğru yazıldı mı?</div>
+                </div>
+                <button
+                  onClick={() => handleConnect()}
+                  className="mt-5 px-5 py-2 rounded bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-rose-600/30 transition"
+                >
+                  <RefreshCw className="w-4 h-4" /> Yeniden Bağlanmayı Dene (Retry)
+                </button>
+              </div>
             ) : (
               <div className="flex flex-col items-center justify-center text-slate-600 p-8 text-center">
                 <div className="w-16 h-16 rounded-full bg-slate-900/80 border border-slate-800 flex items-center justify-center mb-4">
@@ -691,7 +780,7 @@ export default function App() {
                 </div>
                 <h3 className="text-base font-semibold text-slate-400">No Active Remote Control Session</h3>
                 <p className="text-xs text-slate-500 max-w-sm mt-1">
-                  Click ⚙️ to configure host Admin User/Password or click ⚡ <strong>1-Click</strong> to connect instantly!
+                  Click ⚡ <strong>1-Click</strong> on any saved server or add your server above!
                 </p>
               </div>
             )}
@@ -700,8 +789,6 @@ export default function App() {
       </div>
 
       {/* MODALS */}
-
-      {/* EDIT HOST SETTINGS MODAL ⚙️ */}
       {activeModal === 'editHostSettings' && editingHost && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[500px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
@@ -778,9 +865,13 @@ export default function App() {
               </div>
 
               <div className="pt-3 flex justify-between items-center border-t border-slate-800">
-                <span className="text-[11px] text-emerald-400 flex items-center gap-1">
-                  <Check className="w-3.5 h-3.5" /> Auto-Accept Connection Enabled
-                </span>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteHost(editingHost.id)}
+                  className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 rounded font-medium flex items-center gap-1 text-[11px]"
+                >
+                  <Trash2 className="w-3.5 h-3.5" /> Delete Host
+                </button>
                 <div className="flex gap-2">
                   <button
                     type="button"
@@ -793,7 +884,7 @@ export default function App() {
                     type="submit"
                     className="px-4 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded font-medium flex items-center gap-1.5"
                   >
-                    <Check className="w-3.5 h-3.5" /> Save Credentials
+                    <Check className="w-3.5 h-3.5" /> Save Changes Permanently
                   </button>
                 </div>
               </div>
@@ -805,7 +896,7 @@ export default function App() {
       {/* ADD HOST MODAL */}
       {activeModal === 'addHost' && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-[450px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
+          <div className="w-[500px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
             <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
               <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
                 <Plus className="w-4 h-4 text-emerald-400" /> Add New Host to Directory
@@ -838,18 +929,37 @@ export default function App() {
                 />
               </div>
 
-              <div>
-                <label className="text-slate-400 mb-1 block">OS Type:</label>
-                <select
-                  value={newHostOs}
-                  onChange={(e) => setNewHostOs(e.target.value)}
-                  className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded outline-none text-slate-200"
-                >
-                  <option>Windows 11 Pro</option>
-                  <option>Windows 10 Enterprise</option>
-                  <option>Windows Server 2022</option>
-                  <option>Windows Server 2019</option>
-                </select>
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="text-slate-400 mb-1 block">Domain:</label>
+                  <input
+                    type="text"
+                    value={newHostDomain}
+                    onChange={(e) => setNewHostDomain(e.target.value)}
+                    placeholder="WORKGROUP"
+                    className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded outline-none text-slate-100 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-400 mb-1 block">Admin User:</label>
+                  <input
+                    type="text"
+                    value={newHostUser}
+                    onChange={(e) => setNewHostUser(e.target.value)}
+                    placeholder="Administrator"
+                    className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded outline-none text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-400 mb-1 block">Password:</label>
+                  <input
+                    type="password"
+                    value={newHostPass}
+                    onChange={(e) => setNewHostPass(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded outline-none text-slate-100"
+                  />
+                </div>
               </div>
 
               <div className="pt-2 flex justify-end gap-2">
@@ -872,147 +982,7 @@ export default function App() {
         </div>
       )}
 
-      {/* FILE TRANSFER MODAL */}
-      {activeModal === 'files' && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-[850px] h-[550px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
-            <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
-              <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
-                <Folder className="w-4 h-4 text-sky-400" /> DameWare Remote File Explorer - [{targetHost}]
-              </span>
-              <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
-            </div>
-
-            <div className="flex-1 p-4 grid grid-cols-2 gap-4 overflow-hidden">
-              <div className="bg-slate-950/80 rounded border border-slate-800 flex flex-col">
-                <div className="p-2 border-b border-slate-800 text-xs font-semibold text-slate-400 bg-slate-900/50 flex justify-between">
-                  <span>Local Console Workstation</span>
-                  <span className="font-mono text-slate-500">C:\AdminDownloads</span>
-                </div>
-                <div className="flex-1 overflow-y-auto p-2 text-xs space-y-1">
-                  <div className="p-1.5 hover:bg-slate-800 rounded flex justify-between text-slate-300">
-                    <span>📁 DeploymentScripts</span><span>-</span>
-                  </div>
-                  <div className="p-1.5 hover:bg-slate-800 rounded flex justify-between text-slate-300">
-                    <span>📄 DameWare_Agent_v12.2.msi</span><span>14.2 MB</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-slate-950/80 rounded border border-slate-800 flex flex-col">
-                <div className="p-2 border-b border-slate-800 text-xs font-semibold text-slate-400 bg-slate-900/50 flex justify-between">
-                  <span>Remote Host [{targetHost}]</span>
-                  <span className="font-mono text-sky-400">{remotePath}</span>
-                </div>
-                <div className="flex-1 overflow-y-auto p-2 text-xs space-y-1">
-                  {remoteFiles.map((file, i) => (
-                    <div key={i} className="p-1.5 hover:bg-slate-800 rounded flex justify-between items-center text-slate-300">
-                      <span className="flex items-center gap-1.5">
-                        {file.isDirectory ? '📁' : '📄'} {file.name}
-                      </span>
-                      <span className="text-slate-500 font-mono text-[11px]">
-                        {file.isDirectory ? 'DIR' : `${(file.size / 1024).toFixed(1)} KB`}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div className="h-12 px-4 bg-slate-900 border-t border-slate-800 flex items-center justify-between text-xs">
-              <span className="text-slate-400">Drag files between panes or click Upload/Download</span>
-              <div className="flex gap-2">
-                <button className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded font-medium flex items-center gap-1.5">
-                  <Upload className="w-3.5 h-3.5" /> Upload File to Remote
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* CHAT MODAL */}
-      {activeModal === 'chat' && (
-        <div className="fixed bottom-4 right-4 w-[380px] h-[480px] glass-panel rounded-xl border border-slate-800 z-50 flex flex-col overflow-hidden shadow-2xl">
-          <div className="h-10 px-3 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
-            <span className="font-bold text-xs text-slate-200 flex items-center gap-1.5">
-              <MessageSquare className="w-3.5 h-3.5 text-emerald-400" /> In-Session User Chat
-            </span>
-            <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-3.5 h-3.5" /></button>
-          </div>
-
-          <div className="flex-1 p-3 overflow-y-auto space-y-2 text-xs">
-            {chatMessages.map((msg, i) => (
-              <div key={i} className={`flex flex-col ${msg.sender === 'Technician' ? 'items-end' : 'items-start'}`}>
-                <div className="text-[10px] text-slate-500 mb-0.5">{msg.sender} • {msg.time}</div>
-                <div className={`px-3 py-2 rounded-lg max-w-[85%] ${
-                  msg.sender === 'Technician' ? 'bg-sky-600 text-white' : 'bg-slate-800 text-slate-200'
-                }`}>
-                  {msg.text}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <form onSubmit={handleSendChat} className="p-2 border-t border-slate-800 bg-slate-950 flex gap-1.5">
-            <input
-              type="text"
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              placeholder="Type message to end user..."
-              className="flex-1 px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded text-xs outline-none text-slate-100"
-            />
-            <button type="submit" className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-medium">
-              <Send className="w-3.5 h-3.5" />
-            </button>
-          </form>
-        </div>
-      )}
-
-      {/* TASK MANAGER MODAL */}
-      {activeModal === 'taskmgr' && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-[700px] h-[480px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
-            <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
-              <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
-                <Cpu className="w-4 h-4 text-purple-400" /> Remote Task Manager - [{targetHost}]
-              </span>
-              <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-4 text-xs">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-800 text-slate-400 font-mono text-[11px]">
-                    <th className="pb-2">PID</th>
-                    <th className="pb-2">Process Name</th>
-                    <th className="pb-2">CPU %</th>
-                    <th className="pb-2">Memory (MB)</th>
-                    <th className="pb-2 text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60">
-                  {processes.map((proc, idx) => (
-                    <tr key={idx} className="hover:bg-slate-800/50">
-                      <td className="py-2 font-mono text-slate-400">{proc.Id}</td>
-                      <td className="py-2 font-medium text-slate-200">{proc.ProcessName}</td>
-                      <td className="py-2 font-mono text-sky-400">{proc.CPU}%</td>
-                      <td className="py-2 font-mono text-slate-300">{(proc.WorkingSet64 / (1024*1024)).toFixed(1)} MB</td>
-                      <td className="py-2 text-right">
-                        <button className="px-2 py-0.5 bg-rose-500/20 text-rose-400 border border-rose-500/30 rounded hover:bg-rose-500/30">
-                          End Task
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* AGENT DEPLOYMENT MODAL */}
+      {/* OTHER UTILITY MODALS */}
       {activeModal === 'agentInstall' && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[650px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
@@ -1022,18 +992,8 @@ export default function App() {
               </span>
               <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
             </div>
-
             <div className="p-5 space-y-4 text-xs">
-              <p className="text-slate-300">
-                You can download the standalone <strong className="text-sky-400">DameWare_Agent.exe</strong> (Zero dependency, no Node.js required) or deploy automatically over SMB/WMI.
-              </p>
-
-              <div className="bg-slate-950 p-3 rounded border border-slate-800 font-mono text-[11px] text-sky-300 space-y-1">
-                <div># Quick Powershell Remote Download & Firewall Rule:</div>
-                <div className="text-slate-400">New-NetFirewallRule -DisplayName "DameWare 6129" -Direction Inbound -LocalPort 6129 -Protocol TCP -Action Allow</div>
-                <div className="text-slate-400">Invoke-WebRequest -Uri "http://localhost:5173/DameWare_Agent.exe" -OutFile "DameWare_Agent.exe"; .\DameWare_Agent.exe</div>
-              </div>
-
+              <p className="text-slate-300">Download standalone agent executable:</p>
               <div className="flex gap-3 pt-2">
                 <a
                   href="/DameWare_Agent.exe"
@@ -1042,72 +1002,7 @@ export default function App() {
                 >
                   <Download className="w-4 h-4" /> Download Agent Standalone (.EXE)
                 </a>
-                <a
-                  href="/DameWare_QuickStart.bat"
-                  download="DameWare_QuickStart.bat"
-                  className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium rounded text-xs flex items-center justify-center gap-2 decoration-none"
-                >
-                  <Terminal className="w-4 h-4 text-emerald-400" /> Download Auto-Start Batch (.BAT)
-                </a>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* SUBNET SCANNER MODAL */}
-      {activeModal === 'scanner' && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-[600px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
-            <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
-              <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
-                <Search className="w-4 h-4 text-sky-400" /> Subnet Scanner for DameWare Agents (Port 6129)
-              </span>
-              <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
-            </div>
-
-            <div className="p-4 border-b border-slate-800 flex gap-2 text-xs">
-              <input
-                type="text"
-                value={scanSubnet}
-                onChange={(e) => setScanSubnet(e.target.value)}
-                placeholder="192.168.1"
-                className="flex-1 px-3 py-1.5 bg-slate-950 border border-slate-800 rounded font-mono text-slate-100"
-              />
-              <button
-                disabled={isScanning}
-                onClick={runSubnetScan}
-                className="px-4 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded font-medium flex items-center gap-1.5"
-              >
-                {isScanning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />} Scan Range
-              </button>
-            </div>
-
-            <div className="p-4 overflow-y-auto max-h-[300px] text-xs">
-              {scanResults.length === 0 ? (
-                <div className="text-center text-slate-500 py-6">Enter subnet prefix and click Scan Range to discover active agents.</div>
-              ) : (
-                <div className="space-y-1">
-                  {scanResults.map((item, i) => (
-                    <div key={i} className="flex justify-between items-center p-2 rounded bg-slate-900/60 border border-slate-800">
-                      <div>
-                        <div className="font-mono text-slate-200">{item.ip}</div>
-                        <div className="text-[11px] text-slate-400">{item.host}</div>
-                      </div>
-                      {item.port6129 ? (
-                        <button
-                          onClick={() => { handleConnect(item); setActiveModal(null); }}
-                          className="px-2.5 py-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded text-[11px] hover:bg-emerald-500/30"
-                        >
-                          Connect Agent (v{item.agentVersion})
-                        </button>
-                      ) : (
-                        <span className="text-slate-600 text-[11px]">No Agent Detected</span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           </div>
         </div>

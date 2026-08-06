@@ -22,6 +22,7 @@ namespace DameWareNativeAgent
         [DllImport("user32.dll")]
         public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
 
+        public const uint MOUSEEVENTF_MOVE = 0x0001;
         public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         public const uint MOUSEEVENTF_LEFTUP = 0x0004;
         public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
@@ -29,10 +30,10 @@ namespace DameWareNativeAgent
 
         static void Main(string[] args)
         {
-            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Native)";
+            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Mouse Drag Enabled)";
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("==========================================================");
-            Console.WriteLine(" DameWare Native Agent Service - Real Control Active");
+            Console.WriteLine(" DameWare Agent Service - Mouse Hold & Drag Active");
             Console.WriteLine("==========================================================");
 
             TcpListener listener = new TcpListener(IPAddress.Any, PORT);
@@ -65,7 +66,7 @@ namespace DameWareNativeAgent
             byte[] handshakeBytes = Encoding.UTF8.GetBytes(handshake);
             stream.Write(handshakeBytes, 0, handshakeBytes.Length);
 
-            // Frame Streaming Thread (15 FPS)
+            // Frame Streaming Thread (20 FPS for smooth dragging)
             Thread streamThread = new Thread(() => {
                 try {
                     while (client.Connected) {
@@ -75,7 +76,7 @@ namespace DameWareNativeAgent
                             byte[] packetBytes = Encoding.UTF8.GetBytes(packet);
                             stream.Write(packetBytes, 0, packetBytes.Length);
                         }
-                        Thread.Sleep(66); // ~15 FPS
+                        Thread.Sleep(50); // 20 FPS
                     }
                 } catch {}
             });
@@ -105,7 +106,6 @@ namespace DameWareNativeAgent
         {
             try {
                 if (cmd.Contains("MOUSE_INPUT")) {
-                    // Extract xPercent and yPercent
                     double xPercent = GetJsonDouble(cmd, "xPercent");
                     double yPercent = GetJsonDouble(cmd, "yPercent");
                     string action = GetJsonString(cmd, "action");
@@ -115,11 +115,27 @@ namespace DameWareNativeAgent
                     int targetX = (int)(bounds.Width * xPercent);
                     int targetY = (int)(bounds.Height * yPercent);
 
-                    // Move Cursor
+                    // Move cursor position
                     SetCursorPos(targetX, targetY);
 
-                    // Execute Click
-                    if (action == "click") {
+                    // Mouse Down (Hold)
+                    if (action == "mousedown") {
+                        if (button == "right") {
+                            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                        } else {
+                            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                        }
+                    }
+                    // Mouse Up (Release)
+                    else if (action == "mouseup") {
+                        if (button == "right") {
+                            mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                        } else {
+                            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                        }
+                    }
+                    // Single Click
+                    else if (action == "click") {
                         if (button == "right") {
                             mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
                             mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
@@ -132,15 +148,11 @@ namespace DameWareNativeAgent
                     string key = GetJsonString(cmd, "key");
                     if (key == "CAD") {
                         System.Diagnostics.Process.Start("taskmgr.exe");
-                    } else if (key == "WIN_L") {
-                        // Lock Workstation
                     } else {
                         SendKeys.SendWait(key);
                     }
                 }
-            } catch (Exception ex) {
-                Console.WriteLine("Input Error: " + ex.Message);
-            }
+            } catch {}
         }
 
         private static double GetJsonDouble(string json, string key)
