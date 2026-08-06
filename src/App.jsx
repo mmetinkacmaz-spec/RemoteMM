@@ -423,7 +423,7 @@ export default function App() {
               DameWare Mini Remote Control <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono">v12.2 Enterprise</span>
             </h1>
             <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
-              <Shield className="w-3 h-3 text-emerald-400" /> Winlogon, UAC Prompt & SAS Capture Enabled
+              <Shield className="w-3 h-3 text-emerald-400" /> SYSTEM Service & 1-Click BAT Installer Ready
             </p>
           </div>
         </div>
@@ -852,36 +852,36 @@ export default function App() {
       </div>
 
       {/* MODALS */}
-      {/* AGENT DOWNLOAD MODAL WITH SYSTEM SERVICE INSTALLER */}
+      {/* AGENT DOWNLOAD MODAL WITH 1-CLICK BAT INSTALLER */}
       {activeModal === 'agentInstall' && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[650px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
             <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
               <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
-                <Download className="w-4 h-4 text-sky-400" /> DameWare Agent & SYSTEM Service Installer
+                <Download className="w-4 h-4 text-sky-400" /> DameWare Agent & 1-Click SYSTEM Service Installer
               </span>
               <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
             </div>
             <div className="p-5 space-y-4 text-xs">
               <div className="p-3 bg-sky-950/60 rounded-lg border border-sky-800/50 text-sky-200 text-[11px] leading-relaxed">
-                <strong>🔒 Lock Screen (Winlogon) & UAC Capture Notice:</strong><br />
-                To capture Windows Lock screens, Ctrl+Alt+Del SAS, and UAC "Evet / Hayır" prompts, run the Agent as a <strong>Windows SYSTEM Service</strong> on the remote machine.
+                <strong>🔒 Lock Screen (Winlogon) & UAC Evet/Hayır Capture Notice:</strong><br />
+                Sanal makinenizde Kilit Ekranlarını, Ctrl+Alt+Del ve UAC "Evet / Hayır" sorgularını canlı izlemek ve tıklamak için her iki dosyayı da sanal makinenize indirin ve <strong>Install_Agent_Service.bat</strong> dosyasına sağ tıklayıp <strong>Yönetici Olarak Çalıştır</strong> deyin.
               </div>
 
-              <div className="flex gap-3 pt-2">
+              <div className="grid grid-cols-2 gap-3 pt-2">
                 <a
                   href="/DameWare_Agent.exe"
                   download="DameWare_Agent.exe"
-                  className="flex-1 py-2.5 bg-sky-600 hover:bg-sky-500 text-white font-medium rounded text-xs flex items-center justify-center gap-2 decoration-none shadow-lg shadow-sky-600/20"
+                  className="py-2.5 bg-sky-600 hover:bg-sky-500 text-white font-medium rounded text-xs flex items-center justify-center gap-2 decoration-none shadow-lg shadow-sky-600/20"
                 >
-                  <Download className="w-4 h-4" /> Download Agent (.EXE)
+                  <Download className="w-4 h-4" /> 1. Agent Executable (.EXE)
                 </a>
                 <a
-                  href="/Install_DameWare_Service.ps1"
-                  download="Install_DameWare_Service.ps1"
-                  className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded text-xs flex items-center justify-center gap-2 decoration-none shadow-lg shadow-emerald-600/20"
+                  href="/Install_Agent_Service.bat"
+                  download="Install_Agent_Service.bat"
+                  className="py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded text-xs flex items-center justify-center gap-2 decoration-none shadow-lg shadow-emerald-600/20"
                 >
-                  <Shield className="w-4 h-4" /> Download Service Installer (.PS1)
+                  <Shield className="w-4 h-4" /> 2. 1-Click Service Installer (.BAT)
                 </a>
               </div>
             </div>
