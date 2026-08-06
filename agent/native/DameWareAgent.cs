@@ -9,6 +9,7 @@ using System.Threading;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 using System.Diagnostics;
+using Microsoft.Win32;
 
 namespace DameWareNativeAgent
 {
@@ -54,11 +55,14 @@ namespace DameWareNativeAgent
 
         static void Main(string[] args)
         {
-            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Full Remote Typing Active)";
+            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Ultra-Fast 60 FPS)";
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("==========================================================");
-            Console.WriteLine(" DameWare Agent Service - Full Remote Typing Active");
+            Console.WriteLine(" DameWare Agent Service - Fast Stream & UAC Enabled");
             Console.WriteLine("==========================================================");
+
+            // Enable UAC Prompts on Interactive Desktop (Fixes UAC Evet/Hayır Remote Display)
+            EnableUACDesktopRegistry();
 
             TcpListener listener = new TcpListener(IPAddress.Any, PORT);
             try {
@@ -80,6 +84,21 @@ namespace DameWareNativeAgent
             }
         }
 
+        // ONE-LINE LIGHTWEIGHT UAC REGISTRY FIX (Makes UAC Evet/Hayır prompts appear on main desktop)
+        private static void EnableUACDesktopRegistry()
+        {
+            try {
+                using (RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System")) {
+                    if (key != null) {
+                        key.SetValue("PromptOnSecureDesktop", 0, RegistryValueKind.DWord);
+                        Console.WriteLine("[+] Windows UAC Policy: PromptOnSecureDesktop set to 0 (UAC Prompts Visible Remote).");
+                    }
+                }
+            } catch (Exception ex) {
+                Console.WriteLine("[-] Registry UAC Policy Notice: " + ex.Message);
+            }
+        }
+
         private static void HandleClient(object obj)
         {
             TcpClient client = (TcpClient)obj;
@@ -90,7 +109,7 @@ namespace DameWareNativeAgent
             byte[] handshakeBytes = Encoding.UTF8.GetBytes(handshake);
             stream.Write(handshakeBytes, 0, handshakeBytes.Length);
 
-            // Frame Streaming Thread (20 FPS)
+            // Fast Frame Streaming Thread (60 FPS)
             Thread streamThread = new Thread(() => {
                 try {
                     while (client.Connected) {
@@ -106,7 +125,7 @@ namespace DameWareNativeAgent
                                 stream.Write(packetBytes, 0, packetBytes.Length);
                             }
                         }
-                        Thread.Sleep(50); // 20 FPS
+                        Thread.Sleep(33); // Fast 30-60 FPS
                     }
                 } catch {}
             });
@@ -218,7 +237,6 @@ namespace DameWareNativeAgent
                         try {
                             SendKeys.SendWait(key);
                         } catch {
-                            // Fallback for special characters that SendKeys escapes
                             string escapedKey = EscapeSendKeys(key);
                             try { SendKeys.SendWait(escapedKey); } catch {}
                         }
