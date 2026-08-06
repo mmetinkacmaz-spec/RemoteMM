@@ -76,10 +76,6 @@ export default function App() {
   const [newHostPass, setNewHostPass] = useState('');
   const [newHostDomain, setNewHostDomain] = useState('WORKGROUP');
 
-  const [scanSubnet, setScanSubnet] = useState('192.168.1');
-  const [scanResults, setScanResults] = useState([]);
-  const [isScanning, setIsScanning] = useState(false);
-
   // Live Chat State
   const [chatMessages, setChatMessages] = useState([
     { sender: 'DameWare Agent', text: 'Encrypted Remote Session established on Port 6129.', time: new Date().toLocaleTimeString() }
@@ -423,7 +419,7 @@ export default function App() {
               DameWare Mini Remote Control <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono">v12.2 Enterprise</span>
             </h1>
             <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
-              <Shield className="w-3 h-3 text-emerald-400" /> SYSTEM Service & 1-Click BAT Installer Ready
+              <Shield className="w-3 h-3 text-emerald-400" /> Full HD Remote Canvas Stream
             </p>
           </div>
         </div>
@@ -773,31 +769,40 @@ export default function App() {
             </div>
           </div>
 
-          {/* CANVAS DISPLAY AREA */}
-          <div className="flex-1 relative flex items-center justify-center overflow-auto p-2">
+          {/* CANVAS DISPLAY AREA (FULL SIZE HD VIEWPORT) */}
+          <div className="flex-1 relative flex items-center justify-center overflow-hidden p-2">
             {isConnected ? (
               <div
                 ref={canvasRef}
                 tabIndex={0}
-                className={`relative border border-slate-800 rounded shadow-2xl overflow-hidden cursor-crosshair outline-none focus:border-sky-500 ${
-                  scaleMode === 'fit' ? 'max-w-full max-h-full aspect-video' : ''
-                }`}
+                className="relative w-full h-full border border-slate-800/80 rounded-lg shadow-2xl overflow-hidden cursor-crosshair outline-none focus:border-sky-500 flex items-center justify-center bg-black"
                 onMouseDown={handleMouseDown}
                 onMouseUp={handleMouseUp}
                 onMouseMove={handleMouseMove}
                 onKeyDown={handleKeyDown}
                 onContextMenu={(e) => { e.preventDefault(); sendMouseInput('click', e); }}
               >
-                {frameSrc && (
-                  <img src={frameSrc} alt="Remote Desktop" className="w-full h-full object-contain pointer-events-none" />
-                )}
-
-                {frameSvg && (
-                  <div dangerouslySetInnerHTML={{ __html: frameSvg }} className="w-full h-full pointer-events-none" />
+                {frameSrc ? (
+                  <img
+                    src={frameSrc}
+                    alt="Remote Desktop"
+                    className={`w-full h-full pointer-events-none ${
+                      scaleMode === 'fit'
+                        ? 'object-contain'
+                        : scaleMode === 'stretch'
+                        ? 'object-fill'
+                        : 'object-none'
+                    }`}
+                  />
+                ) : (
+                  <div className="flex flex-col items-center justify-center text-slate-500 gap-2">
+                    <RefreshCw className="w-8 h-8 animate-spin text-sky-400" />
+                    <span className="text-xs">Receiving High Definition Stream...</span>
+                  </div>
                 )}
 
                 {isInputLocked && (
-                  <div className="absolute top-4 left-4 bg-amber-500/90 text-slate-950 px-3 py-1 rounded font-bold text-xs flex items-center gap-1.5 shadow-lg animate-pulse">
+                  <div className="absolute top-4 left-4 bg-amber-500/90 text-slate-950 px-3 py-1 rounded font-bold text-xs flex items-center gap-1.5 shadow-lg animate-pulse z-30">
                     <Lock className="w-3.5 h-3.5" /> REMOTE PHYSICAL INPUT BLOCKED (ADMIN CONTROL ACTIVE)
                   </div>
                 )}
