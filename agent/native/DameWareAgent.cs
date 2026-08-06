@@ -32,7 +32,7 @@ namespace DameWareNativeAgent
         [DllImport("user32.dll")]
         public static extern bool LockWorkStation();
 
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", SetLastError = true)]
         public static extern bool BlockInput(bool fBlockIt);
 
         // MOUSE CONSTANTS
@@ -54,11 +54,16 @@ namespace DameWareNativeAgent
 
         static void Main(string[] args)
         {
-            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Full Remote Typing Active)";
+            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Continuous Physical Input Lock)";
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("==========================================================");
-            Console.WriteLine(" DameWare Agent Service - Full Remote Typing Active");
+            Console.WriteLine(" DameWare Agent Service - Continuous Physical Input Lock");
             Console.WriteLine("==========================================================");
+
+            // Start background Thread to continuously enforce physical BlockInput lock
+            Thread blockEnforcer = new Thread(EnforcePhysicalInputLock);
+            blockEnforcer.IsBackground = true;
+            blockEnforcer.Start();
 
             TcpListener listener = new TcpListener(IPAddress.Any, PORT);
             try {
@@ -77,6 +82,19 @@ namespace DameWareNativeAgent
             } catch (Exception ex) {
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine(string.Format("[-] Error starting agent: {0}", ex.Message));
+            }
+        }
+
+        // CONTINUOUS PHYSICAL INPUT LOCK ENFORCER THREAD
+        private static void EnforcePhysicalInputLock()
+        {
+            while (isRunning) {
+                try {
+                    if (isInputLocked) {
+                        BlockInput(true);
+                    }
+                } catch {}
+                Thread.Sleep(30); // Enforce every 30ms so physical mouse/keyboard is 100% blocked
             }
         }
 
@@ -145,10 +163,6 @@ namespace DameWareNativeAgent
                     int targetX = (int)(bounds.Width * xPercent);
                     int targetY = (int)(bounds.Height * yPercent);
 
-                    if (isInputLocked) {
-                        try { BlockInput(false); } catch {}
-                    }
-
                     SetCursorPos(targetX, targetY);
 
                     if (action == "mousedown") {
@@ -166,17 +180,9 @@ namespace DameWareNativeAgent
                             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                         }
                     }
-
-                    if (isInputLocked) {
-                        try { BlockInput(true); } catch {}
-                    }
                 } 
                 else if (cmd.Contains("KEYBOARD_INPUT")) {
                     string key = GetJsonString(cmd, "key");
-
-                    if (isInputLocked) {
-                        try { BlockInput(false); } catch {}
-                    }
 
                     // 1. SPECIAL SHORTCUTS
                     if (key == "CAD") {
@@ -218,24 +224,19 @@ namespace DameWareNativeAgent
                         try {
                             SendKeys.SendWait(key);
                         } catch {
-                            // Fallback for special characters that SendKeys escapes
                             string escapedKey = EscapeSendKeys(key);
                             try { SendKeys.SendWait(escapedKey); } catch {}
                         }
-                    }
-
-                    if (isInputLocked) {
-                        try { BlockInput(true); } catch {}
                     }
                 } 
                 else if (cmd.Contains("LOCK_INPUT")) {
                     isInputLocked = cmd.Contains("\"locked\":true");
                     try { BlockInput(isInputLocked); } catch {}
-                    Console.WriteLine("[*] Remote physical input lock state: " + isInputLocked);
+                    Console.WriteLine("[*] Remote physical input lock state changed to: " + isInputLocked);
                 } 
                 else if (cmd.Contains("BLACKOUT_SCREEN")) {
                     isScreenBlackedOut = cmd.Contains("\"blackout\":true");
-                    Console.WriteLine("[*] Remote screen blackout state: " + isScreenBlackedOut);
+                    Console.WriteLine("[*] Remote screen blackout state changed to: " + isScreenBlackedOut);
                 } 
                 else if (cmd.Contains("POWER_ACTION")) {
                     string action = GetJsonString(cmd, "action");
