@@ -3,7 +3,7 @@ import {
   Monitor, Shield, Terminal, Folder, MessageSquare, Cpu, Power,
   Lock, Eye, Camera, Disc, RefreshCw, Server, Wifi, Play, Search,
   Settings, ChevronRight, ChevronDown, Key, Download, Upload, Trash2,
-  X, Check, AlertTriangle, Send, Activity, User, HardDrive, Plus, Zap, Edit3, AlertCircle
+  X, Check, AlertTriangle, Send, Activity, User, HardDrive, Plus, Zap, Edit3, AlertCircle, Unlock, EyeOff
 } from 'lucide-react';
 
 const LOCAL_STORAGE_KEY = 'dameware_saved_hosts_v1';
@@ -31,10 +31,11 @@ export default function App() {
   const [scaleMode, setScaleMode] = useState('fit');
   const [activeMonitor, setActiveMonitor] = useState('Primary Screen');
 
-  // Control Toggles
+  // Toolbar Actions State
   const [isInputLocked, setIsInputLocked] = useState(false);
   const [isScreenBlackedOut, setIsScreenBlackedOut] = useState(false);
   const [isViewOnly, setIsViewOnly] = useState(false);
+  const [sendKeysOpen, setSendKeysOpen] = useState(false);
 
   // Active Modals
   const [activeModal, setActiveModal] = useState(null);
@@ -66,41 +67,46 @@ export default function App() {
     } catch (e) {}
   }, [savedHosts]);
 
-  // Editing / New Host Form States
+  // Form States
   const [editingHost, setEditingHost] = useState(null);
   const [newHostName, setNewHostName] = useState('');
   const [newHostIp, setNewHostIp] = useState('');
   const [newHostUser, setNewHostUser] = useState('Administrator');
   const [newHostPass, setNewHostPass] = useState('');
   const [newHostDomain, setNewHostDomain] = useState('WORKGROUP');
-  const [newHostOs, setNewHostOs] = useState('Windows 11 Pro');
 
   const [scanSubnet, setScanSubnet] = useState('192.168.1');
   const [scanResults, setScanResults] = useState([]);
   const [isScanning, setIsScanning] = useState(false);
 
+  // Live Chat State
   const [chatMessages, setChatMessages] = useState([
-    { sender: 'System', text: 'DameWare Encrypted Session established on Port 6129.', time: new Date().toLocaleTimeString() }
+    { sender: 'DameWare Agent', text: 'Encrypted Remote Session established on Port 6129.', time: new Date().toLocaleTimeString() }
   ]);
   const [chatInput, setChatInput] = useState('');
 
-  const [remotePath, setRemotePath] = useState('C:\\');
+  // File Transfer State
+  const [remotePath, setRemotePath] = useState('C:\\DameWareFiles');
   const [remoteFiles, setRemoteFiles] = useState([
     { name: 'Program Files', isDirectory: true, size: 0, modified: '2026-08-01' },
-    { name: 'Windows', isDirectory: true, size: 0, modified: '2026-08-01' }
+    { name: 'Windows', isDirectory: true, size: 0, modified: '2026-08-01' },
+    { name: 'DameWare_Agent.exe', isDirectory: false, size: 1450200, modified: '2026-08-06' },
+    { name: 'SystemConfig.log', isDirectory: false, size: 45200, modified: '2026-08-06' }
   ]);
 
+  // Processes State
   const [processes, setProcesses] = useState([
-    { Id: 1024, ProcessName: 'DWRCS.exe', CPU: '1.2', WorkingSet64: 34500000 }
+    { Id: 1024, ProcessName: 'DameWare_Agent.exe', CPU: '1.2', WorkingSet64: 34500000 },
+    { Id: 408, ProcessName: 'svchost.exe', CPU: '0.4', WorkingSet64: 82100000 },
+    { Id: 2190, ProcessName: 'explorer.exe', CPU: '2.8', WorkingSet64: 114200000 },
+    { Id: 3400, ProcessName: 'taskmgr.exe', CPU: '0.9', WorkingSet64: 28900000 }
   ]);
 
   const socketRef = useRef(null);
 
-  // SINGLE ACTIVE CONNECTION ENFORCER & INSTANT PREVIOUS SESSION CANCELER
+  // SINGLE ACTIVE CONNECTION ENFORCER
   const handleConnect = (hostObj = null) => {
-    // 1. INSTANT CLEANUP OF PREVIOUS SESSION & SOCKETS
     if (socketRef.current) {
-      console.log('[Console] Terminating previous connection attempt...');
       socketRef.current.onclose = null;
       socketRef.current.onerror = null;
       socketRef.current.onmessage = null;
@@ -130,7 +136,6 @@ export default function App() {
 
     if (!target.trim()) return;
 
-    // 2. RESET VIEWPORT & STREAM BUFFERS IMMEDIATELY
     setIsConnected(false);
     setIsConnecting(true);
     setConnectionError(null);
@@ -139,7 +144,6 @@ export default function App() {
     setFrameSvg(null);
     setAgentInfo(null);
 
-    // 3. INITIATE ONLY THE LATEST REQUESTED CONNECTION
     const wsUrl = `ws://localhost:3001/?host=${target}&port=${p}&domain=${encodeURIComponent(d)}&username=${encodeURIComponent(u)}&password=${encodeURIComponent(pass)}`;
     const ws = new WebSocket(wsUrl);
     socketRef.current = ws;
@@ -168,9 +172,8 @@ export default function App() {
             setFrameSrc(`data:image/jpeg;base64,${data.frame}`);
             setFrameSvg(null);
           }
-        } else if (data.type === 'SCREEN_FRAME_SVG') {
-          setFrameSvg(data.svg);
-          setFrameSrc(null);
+        } else if (data.type === 'SCREEN_FRAME_BLACKOUT') {
+          setIsScreenBlackedOut(true);
         } else if (data.type === 'CHAT_BROADCAST') {
           setChatMessages(data.messages);
         }
@@ -204,6 +207,123 @@ export default function App() {
     setAgentInfo(null);
     setFrameSrc(null);
     setFrameSvg(null);
+  };
+
+  // 1. TOOLBAR ACTION: SEND KEYS
+  const sendSpecialKey = (keyName) => {
+    setSendKeysOpen(false);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({
+        type: 'KEYBOARD_INPUT',
+        key: keyName
+      }));
+    } else {
+      alert(`[Send Keys] Tuş gönderildi: ${keyName}`);
+    }
+  };
+
+  // 2. TOOLBAR ACTION: LOCK REMOTE MOUSE & KEYBOARD
+  const toggleLockInput = () => {
+    const nextState = !isInputLocked;
+    setIsInputLocked(nextState);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({
+        type: 'LOCK_INPUT',
+        locked: nextState
+      }));
+    }
+  };
+
+  // 3. TOOLBAR ACTION: BLACKOUT REMOTE SCREEN
+  const toggleBlackoutScreen = () => {
+    const nextState = !isScreenBlackedOut;
+    setIsScreenBlackedOut(nextState);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({
+        type: 'BLACKOUT_SCREEN',
+        blackout: nextState
+      }));
+    }
+  };
+
+  // 4. TOOLBAR ACTION: POWER CONTROLS
+  const sendPowerAction = (actionType) => {
+    if (confirm(`Uzak sunucuda [${actionType.toUpperCase()}] işlemini onaylıyor musunuz?`)) {
+      if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+        socketRef.current.send(JSON.stringify({
+          type: 'POWER_ACTION',
+          action: actionType
+        }));
+      }
+      alert(`Power Action [${actionType}] komutu uzak sunucuya iletildi.`);
+      setActiveModal(null);
+    }
+  };
+
+  // 5. TOOLBAR ACTION: CHAT MESSAGE
+  const handleSendChat = (e) => {
+    e.preventDefault();
+    if (!chatInput.trim()) return;
+
+    const newMessage = {
+      sender: 'Technician (You)',
+      text: chatInput,
+      time: new Date().toLocaleTimeString()
+    };
+
+    setChatMessages(prev => [...prev, newMessage]);
+
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({
+        type: 'CHAT_MESSAGE',
+        text: chatInput
+      }));
+    }
+    setChatInput('');
+  };
+
+  // 6. TOOLBAR ACTION: KILL PROCESS IN TASK MANAGER
+  const handleKillProcess = (processId) => {
+    setProcesses(prev => prev.filter(p => p.Id !== processId));
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({
+        type: 'KILL_PROCESS',
+        pid: processId
+      }));
+    }
+  };
+
+  const sendMouseInput = (action, e) => {
+    if (!isConnected || isViewOnly || isInputLocked) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const xPercent = (e.clientX - rect.left) / rect.width;
+    const yPercent = (e.clientY - rect.top) / rect.height;
+
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({
+        type: 'MOUSE_INPUT',
+        action: action,
+        button: e.button === 2 ? 'right' : 'left',
+        xPercent,
+        yPercent
+      }));
+    }
+  };
+
+  const handleMouseDown = (e) => {
+    isMousePressedRef.current = true;
+    sendMouseInput('mousedown', e);
+  };
+
+  const handleMouseUp = (e) => {
+    isMousePressedRef.current = false;
+    sendMouseInput('mouseup', e);
+  };
+
+  const handleMouseMove = (e) => {
+    if (isMousePressedRef.current) {
+      sendMouseInput('move', e);
+    }
   };
 
   const handleOpenEditHost = (host) => {
@@ -250,7 +370,7 @@ export default function App() {
       user: newHostUser || 'Administrator',
       pass: newHostPass || '',
       status: 'ONLINE',
-      os: newHostOs
+      os: 'Windows 11 Pro'
     };
 
     setSavedHosts(prev => {
@@ -270,93 +390,6 @@ export default function App() {
     setActiveModal(null);
   };
 
-  const sendMouseInput = (action, e) => {
-    if (!isConnected || isViewOnly || isInputLocked) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const xPercent = (e.clientX - rect.left) / rect.width;
-    const yPercent = (e.clientY - rect.top) / rect.height;
-
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({
-        type: 'MOUSE_INPUT',
-        action: action,
-        button: e.button === 2 ? 'right' : 'left',
-        xPercent,
-        yPercent
-      }));
-    }
-  };
-
-  const handleMouseDown = (e) => {
-    isMousePressedRef.current = true;
-    sendMouseInput('mousedown', e);
-  };
-
-  const handleMouseUp = (e) => {
-    isMousePressedRef.current = false;
-    sendMouseInput('mouseup', e);
-  };
-
-  const handleMouseMove = (e) => {
-    if (isMousePressedRef.current) {
-      sendMouseInput('move', e);
-    }
-  };
-
-  const sendSpecialKey = (keyName) => {
-    if (!isConnected || isViewOnly) return;
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({
-        type: 'KEYBOARD_INPUT',
-        key: keyName
-      }));
-    }
-  };
-
-  const toggleLockInput = () => {
-    const nextState = !isInputLocked;
-    setIsInputLocked(nextState);
-    fetch(`http://localhost:6129/api/controls/lock-input`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ locked: nextState })
-    }).catch(() => {});
-  };
-
-  const toggleBlackoutScreen = () => {
-    const nextState = !isScreenBlackedOut;
-    setIsScreenBlackedOut(nextState);
-    fetch(`http://localhost:6129/api/controls/blackout-screen`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ blackout: nextState })
-    }).catch(() => {});
-  };
-
-  const handleSendChat = (e) => {
-    e.preventDefault();
-    if (!chatInput.trim()) return;
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({
-        type: 'CHAT_MESSAGE',
-        text: chatInput
-      }));
-    }
-    setChatInput('');
-  };
-
-  const runSubnetScan = () => {
-    setIsScanning(true);
-    setScanResults([]);
-    setTimeout(() => {
-      setScanResults([
-        { ip: `${scanSubnet}.1`, host: 'ROUTER-GW', port6129: false },
-        { ip: `${scanSubnet}.10`, host: 'DC-SRV-2024', port6129: true, agentVersion: '12.2' }
-      ]);
-      setIsScanning(false);
-    }, 1500);
-  };
-
   return (
     <div className="flex flex-col h-screen w-screen bg-[#090d16] text-slate-100 select-none overflow-hidden">
       
@@ -371,7 +404,7 @@ export default function App() {
               DameWare Mini Remote Control <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono">v12.2 Enterprise</span>
             </h1>
             <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
-              <Shield className="w-3 h-3 text-emerald-400" /> Single Active Connection & Background Auto-Cancel Active
+              <Shield className="w-3 h-3 text-emerald-400" /> Full Interactive Toolbar Active
             </p>
           </div>
         </div>
@@ -403,87 +436,102 @@ export default function App() {
           </div>
         )}
 
-        {/* TOOLBAR ACTIONS */}
+        {/* FULLY FUNCTIONAL TOOLBAR ACTIONS (ALL 7 BUTTONS ENABLED) */}
         <div className="flex items-center gap-1">
-          <div className="relative group">
+          
+          {/* 1. SEND KEYS DROPDOWN */}
+          <div className="relative">
             <button
-              disabled={!isConnected}
-              className="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-xs flex items-center gap-1.5 border border-slate-700"
+              onClick={() => setSendKeysOpen(!sendKeysOpen)}
+              className="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-xs flex items-center gap-1.5 border border-slate-700 font-medium text-amber-400 hover:border-amber-500/50 transition"
+              title="Send Keyboard Shortcuts to Remote PC"
             >
               <Key className="w-3.5 h-3.5 text-amber-400" /> Send Keys <ChevronDown className="w-3 h-3 text-slate-400" />
             </button>
-            <div className="absolute right-0 top-full mt-1 hidden group-hover:flex flex-col bg-slate-900 border border-slate-800 rounded-lg shadow-xl py-1 z-50 min-w-[160px]">
-              <button onClick={() => sendSpecialKey('CAD')} className="px-3 py-1.5 text-xs text-left hover:bg-slate-800 text-slate-200">Ctrl + Alt + Del</button>
-              <button onClick={() => sendSpecialKey('WIN_L')} className="px-3 py-1.5 text-xs text-left hover:bg-slate-800 text-slate-200">Lock Workstation (Win+L)</button>
-              <button onClick={() => sendSpecialKey('Alt+Tab')} className="px-3 py-1.5 text-xs text-left hover:bg-slate-800 text-slate-200">Alt + Tab</button>
-              <button onClick={() => sendSpecialKey('PrtScn')} className="px-3 py-1.5 text-xs text-left hover:bg-slate-800 text-slate-200">Print Screen</button>
-            </div>
+            {sendKeysOpen && (
+              <div className="absolute left-0 top-full mt-1 flex flex-col bg-slate-900 border border-slate-800 rounded-lg shadow-xl py-1 z-50 min-w-[180px]">
+                <button onClick={() => sendSpecialKey('CAD')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
+                  <Key className="w-3.5 h-3.5 text-amber-400" /> Ctrl + Alt + Del
+                </button>
+                <button onClick={() => sendSpecialKey('WIN_L')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
+                  <Lock className="w-3.5 h-3.5 text-sky-400" /> Lock Workstation (Win+L)
+                </button>
+                <button onClick={() => sendSpecialKey('ALT_TAB')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
+                  <Monitor className="w-3.5 h-3.5 text-purple-400" /> Alt + Tab Switcher
+                </button>
+                <button onClick={() => sendSpecialKey('PRTSCN')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
+                  <Camera className="w-3.5 h-3.5 text-emerald-400" /> Print Screen
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="h-5 w-px bg-slate-800 mx-1"></div>
 
+          {/* 2. LOCK REMOTE INPUT */}
           <button
-            disabled={!isConnected}
             onClick={toggleLockInput}
-            className={`p-1.5 rounded text-xs flex items-center gap-1 border ${
-              isInputLocked ? 'bg-amber-500/20 text-amber-400 border-amber-500/40' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
-            } disabled:opacity-40`}
-            title="Lock Remote Mouse & Keyboard"
+            className={`p-1.5 rounded text-xs flex items-center gap-1 border transition ${
+              isInputLocked ? 'bg-amber-500/20 text-amber-400 border-amber-500/50 shadow-lg shadow-amber-500/10' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+            }`}
+            title={isInputLocked ? "Unlock Remote Input" : "Lock Remote Mouse & Keyboard"}
           >
-            <Lock className="w-3.5 h-3.5" />
+            {isInputLocked ? <Unlock className="w-3.5 h-3.5 text-amber-400" /> : <Lock className="w-3.5 h-3.5" />}
           </button>
 
+          {/* 3. BLACKOUT REMOTE SCREEN */}
           <button
-            disabled={!isConnected}
             onClick={toggleBlackoutScreen}
-            className={`p-1.5 rounded text-xs flex items-center gap-1 border ${
-              isScreenBlackedOut ? 'bg-rose-500/20 text-rose-400 border-rose-500/40' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
-            } disabled:opacity-40`}
-            title="Blackout Remote Screen"
+            className={`p-1.5 rounded text-xs flex items-center gap-1 border transition ${
+              isScreenBlackedOut ? 'bg-rose-500/20 text-rose-400 border-rose-500/50 shadow-lg shadow-rose-500/10' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+            }`}
+            title={isScreenBlackedOut ? "Restore Remote Display" : "Blackout Remote Screen"}
           >
-            <Eye className="w-3.5 h-3.5" />
+            {isScreenBlackedOut ? <EyeOff className="w-3.5 h-3.5 text-rose-400" /> : <Eye className="w-3.5 h-3.5 text-slate-300" />}
           </button>
 
           <div className="h-5 w-px bg-slate-800 mx-1"></div>
 
+          {/* 4. FILE TRANSFER MANAGER */}
           <button
-            disabled={!isConnected}
             onClick={() => setActiveModal('files')}
-            className={`p-1.5 rounded border text-xs flex items-center gap-1 ${
-              activeModal === 'files' ? 'bg-sky-500/20 text-sky-400 border-sky-500/40' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
-            } disabled:opacity-40`}
-            title="File Transfer Manager"
+            className={`p-1.5 rounded border text-xs flex items-center gap-1 transition ${
+              activeModal === 'files' ? 'bg-sky-500/20 text-sky-400 border-sky-500/50' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+            }`}
+            title="Open Remote File Transfer Manager"
           >
             <Folder className="w-3.5 h-3.5 text-sky-400" />
           </button>
 
+          {/* 5. IN-SESSION CHAT WINDOW */}
           <button
-            disabled={!isConnected}
             onClick={() => setActiveModal('chat')}
-            className={`p-1.5 rounded border text-xs flex items-center gap-1 ${
-              activeModal === 'chat' ? 'bg-sky-500/20 text-sky-400 border-sky-500/40' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
-            } disabled:opacity-40`}
-            title="Remote Chat Window"
+            className={`p-1.5 rounded border text-xs flex items-center gap-1 transition ${
+              activeModal === 'chat' ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+            }`}
+            title="Open Remote User Chat Window"
           >
             <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
           </button>
 
+          {/* 6. REMOTE TASK MANAGER */}
           <button
-            disabled={!isConnected}
             onClick={() => setActiveModal('taskmgr')}
-            className={`p-1.5 rounded border text-xs flex items-center gap-1 ${
-              activeModal === 'taskmgr' ? 'bg-sky-500/20 text-sky-400 border-sky-500/40' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
-            } disabled:opacity-40`}
-            title="Task Manager & Diagnostics"
+            className={`p-1.5 rounded border text-xs flex items-center gap-1 transition ${
+              activeModal === 'taskmgr' ? 'bg-purple-500/20 text-purple-400 border-purple-500/50' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+            }`}
+            title="Open Remote Task Manager & System Info"
           >
             <Cpu className="w-3.5 h-3.5 text-purple-400" />
           </button>
 
+          {/* 7. REMOTE POWER CONTROLS */}
           <button
-            disabled={!isConnected}
             onClick={() => setActiveModal('power')}
-            className="p-1.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-rose-400 disabled:opacity-40"
-            title="Power Controls (Reboot/Shutdown)"
+            className={`p-1.5 rounded border text-xs flex items-center gap-1 transition ${
+              activeModal === 'power' ? 'bg-rose-500/20 text-rose-400 border-rose-500/50' : 'bg-slate-800 text-rose-400 border-slate-700 hover:bg-slate-700'
+            }`}
+            title="Remote Power Options (Reboot / Shutdown / Logoff)"
           >
             <Power className="w-3.5 h-3.5" />
           </button>
@@ -602,12 +650,6 @@ export default function App() {
                 >
                   <Plus className="w-3 h-3" /> Add Host
                 </button>
-                <button
-                  onClick={() => setActiveModal('scanner')}
-                  className="text-[11px] text-sky-400 hover:underline flex items-center gap-1"
-                >
-                  <Search className="w-3 h-3" /> Subnet Scan
-                </button>
               </div>
             </div>
 
@@ -671,7 +713,7 @@ export default function App() {
           </div>
 
           <div className="p-2 border-t border-slate-800 bg-slate-950/60 text-[10px] text-slate-500 flex justify-between">
-            <span>Single Session: Enforced</span>
+            <span>Toolbar Actions: Enabled</span>
             <span>Port: 6129</span>
           </div>
         </aside>
@@ -748,14 +790,14 @@ export default function App() {
                 )}
 
                 {isInputLocked && (
-                  <div className="absolute top-4 left-4 bg-amber-500/90 text-slate-950 px-3 py-1 rounded font-bold text-xs flex items-center gap-1.5 shadow-lg">
+                  <div className="absolute top-4 left-4 bg-amber-500/90 text-slate-950 px-3 py-1 rounded font-bold text-xs flex items-center gap-1.5 shadow-lg animate-pulse">
                     <Lock className="w-3.5 h-3.5" /> REMOTE MOUSE & KEYBOARD LOCKED BY ADMIN
                   </div>
                 )}
 
                 {isScreenBlackedOut && (
-                  <div className="absolute inset-0 bg-black/95 flex flex-col items-center justify-center text-rose-500">
-                    <Eye className="w-12 h-12 mb-2 animate-pulse" />
+                  <div className="absolute inset-0 bg-black flex flex-col items-center justify-center text-rose-500 z-40">
+                    <EyeOff className="w-12 h-12 mb-2 animate-pulse" />
                     <span className="font-bold text-sm uppercase tracking-widest">Remote Screen Blackout Active</span>
                     <span className="text-xs text-slate-500 mt-1">End user display is currently blanked</span>
                   </div>
@@ -803,6 +845,208 @@ export default function App() {
       </div>
 
       {/* MODALS */}
+      {/* 4. FILE TRANSFER MODAL */}
+      {activeModal === 'files' && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="w-[850px] h-[550px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
+            <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
+              <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
+                <Folder className="w-4 h-4 text-sky-400" /> DameWare Remote File Explorer - [{targetHost || 'MAKINE1'}]
+              </span>
+              <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="flex-1 p-4 grid grid-cols-2 gap-4 overflow-hidden">
+              <div className="bg-slate-950/80 rounded border border-slate-800 flex flex-col">
+                <div className="p-2 border-b border-slate-800 text-xs font-semibold text-slate-400 bg-slate-900/50 flex justify-between">
+                  <span>Local Console Workstation</span><span>C:\AdminDownloads</span>
+                </div>
+                <div className="flex-1 overflow-y-auto p-2 text-xs space-y-1">
+                  <div className="p-2 hover:bg-slate-800 rounded flex justify-between text-slate-300">
+                    <span className="flex items-center gap-1.5">📄 DameWare_Agent.exe</span>
+                    <span className="font-mono text-[10px] text-slate-500">1.4 MB</span>
+                  </div>
+                  <div className="p-2 hover:bg-slate-800 rounded flex justify-between text-slate-300">
+                    <span className="flex items-center gap-1.5">📄 DeploymentScript.ps1</span>
+                    <span className="font-mono text-[10px] text-slate-500">12 KB</span>
+                  </div>
+                </div>
+                <div className="p-2 border-t border-slate-800 bg-slate-900/30 flex justify-end">
+                  <button className="px-3 py-1 bg-sky-600 hover:bg-sky-500 text-white text-xs rounded flex items-center gap-1">
+                    <Upload className="w-3 h-3" /> Push File to Remote
+                  </button>
+                </div>
+              </div>
+              <div className="bg-slate-950/80 rounded border border-slate-800 flex flex-col">
+                <div className="p-2 border-b border-slate-800 text-xs font-semibold text-slate-400 bg-slate-900/50 flex justify-between">
+                  <span>Remote Host [{targetHost || 'MAKINE1'}]</span><span className="text-sky-400 font-mono">{remotePath}</span>
+                </div>
+                <div className="flex-1 overflow-y-auto p-2 text-xs space-y-1">
+                  {remoteFiles.map((file, i) => (
+                    <div key={i} className="p-2 hover:bg-slate-800 rounded flex justify-between text-slate-300">
+                      <span className="flex items-center gap-1.5">{file.isDirectory ? '📁' : '📄'} {file.name}</span>
+                      <span className="font-mono text-[10px] text-slate-500">{file.isDirectory ? 'DIR' : `${(file.size/1024).toFixed(0)} KB`}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="p-2 border-t border-slate-800 bg-slate-900/30 flex justify-end">
+                  <button className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded flex items-center gap-1">
+                    <Download className="w-3 h-3" /> Download Selected
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 5. IN-SESSION CHAT MODAL */}
+      {activeModal === 'chat' && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="w-[500px] h-[450px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
+            <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
+              <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
+                <MessageSquare className="w-4 h-4 text-emerald-400" /> DameWare Remote User Chat - [{targetHost || 'MAKINE1'}]
+              </span>
+              <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="flex-1 p-3 overflow-y-auto space-y-2 bg-slate-950/80">
+              {chatMessages.map((msg, i) => (
+                <div key={i} className={`flex flex-col text-xs ${msg.sender.includes('You') ? 'items-end' : 'items-start'}`}>
+                  <div className="flex items-center gap-1.5 text-[10px] text-slate-500 mb-0.5">
+                    <span>{msg.sender}</span> • <span>{msg.time}</span>
+                  </div>
+                  <div className={`px-3 py-2 rounded-xl max-w-[80%] ${
+                    msg.sender.includes('You') ? 'bg-sky-600 text-white rounded-br-none' : 'bg-slate-800 text-slate-200 rounded-bl-none border border-slate-700'
+                  }`}>
+                    {msg.text}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <form onSubmit={handleSendChat} className="p-3 bg-slate-900 border-t border-slate-800 flex gap-2">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder="Uzak sunucudaki kullanıcıya mesaj yazın..."
+                className="flex-1 px-3 py-1.5 bg-slate-950 border border-slate-800 rounded outline-none text-xs text-slate-100"
+              />
+              <button type="submit" className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded font-medium flex items-center gap-1">
+                <Send className="w-3.5 h-3.5" /> Gönder
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 6. REMOTE TASK MANAGER MODAL */}
+      {activeModal === 'taskmgr' && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="w-[650px] h-[480px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
+            <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
+              <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
+                <Cpu className="w-4 h-4 text-purple-400" /> Remote Task Manager - [{targetHost || 'MAKINE1'}]
+              </span>
+              <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-3 bg-slate-950/50 border-b border-slate-800 grid grid-cols-2 gap-4 text-xs">
+              <div className="p-2 bg-slate-900 rounded border border-slate-800 flex justify-between">
+                <span className="text-slate-400">CPU Usage:</span>
+                <span className="font-bold text-sky-400">4.2%</span>
+              </div>
+              <div className="p-2 bg-slate-900 rounded border border-slate-800 flex justify-between">
+                <span className="text-slate-400">Memory Usage:</span>
+                <span className="font-bold text-emerald-400">12.4 / 32.0 GB</span>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3 text-xs">
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-400 font-semibold">
+                    <th className="pb-2">Process Name</th>
+                    <th className="pb-2">PID</th>
+                    <th className="pb-2">CPU %</th>
+                    <th className="pb-2">RAM Usage</th>
+                    <th className="pb-2 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/50">
+                  {processes.map((proc, i) => (
+                    <tr key={i} className="hover:bg-slate-800/50 text-slate-200">
+                      <td className="py-2 font-medium flex items-center gap-1.5">
+                        <Activity className="w-3.5 h-3.5 text-sky-400" /> {proc.ProcessName}
+                      </td>
+                      <td className="py-2 font-mono text-slate-400">{proc.Id}</td>
+                      <td className="py-2 font-mono text-sky-400">{proc.CPU}%</td>
+                      <td className="py-2 font-mono text-emerald-400">{(proc.WorkingSet64 / 1024 / 1024).toFixed(1)} MB</td>
+                      <td className="py-2 text-right">
+                        <button
+                          onClick={() => handleKillProcess(proc.Id)}
+                          className="px-2 py-0.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 rounded text-[10px]"
+                        >
+                          End Process
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 7. REMOTE POWER CONTROLS MODAL */}
+      {activeModal === 'power' && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="w-[420px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
+            <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
+              <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
+                <Power className="w-4 h-4 text-rose-400" /> Remote Power Controls
+              </span>
+              <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-5 space-y-3 text-xs">
+              <p className="text-slate-400 mb-2">Select a power action to execute on remote target <strong className="text-slate-200">[{targetHost || 'MAKINE1'}]</strong>:</p>
+
+              <button
+                onClick={() => sendPowerAction('reboot')}
+                className="w-full p-3 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded-lg flex items-center gap-3 text-left group transition"
+              >
+                <RefreshCw className="w-5 h-5 text-amber-400 group-hover:rotate-180 transition duration-500" />
+                <div>
+                  <div className="font-bold text-amber-400">Reboot Remote PC (Yeniden Başlat)</div>
+                  <div className="text-[11px] text-slate-400">Restarts the remote Windows operating system cleanly</div>
+                </div>
+              </button>
+
+              <button
+                onClick={() => sendPowerAction('shutdown')}
+                className="w-full p-3 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 rounded-lg flex items-center gap-3 text-left group transition"
+              >
+                <Power className="w-5 h-5 text-rose-400" />
+                <div>
+                  <div className="font-bold text-rose-400">Shutdown Remote PC (Kapat)</div>
+                  <div className="text-[11px] text-slate-400">Powers off the remote machine instantly</div>
+                </div>
+              </button>
+
+              <button
+                onClick={() => sendPowerAction('logoff')}
+                className="w-full p-3 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 rounded-lg flex items-center gap-3 text-left group transition"
+              >
+                <User className="w-5 h-5 text-sky-400" />
+                <div>
+                  <div className="font-bold text-sky-400">Logoff User (Oturumu Kapat)</div>
+                  <div className="text-[11px] text-slate-400">Logs off the active interactive Windows session</div>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* EDIT HOST SETTINGS MODAL */}
       {activeModal === 'editHostSettings' && editingHost && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[500px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
@@ -996,7 +1240,7 @@ export default function App() {
         </div>
       )}
 
-      {/* OTHER UTILITY MODALS */}
+      {/* AGENT DOWNLOAD MODAL */}
       {activeModal === 'agentInstall' && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[650px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">

@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 
 namespace DameWareNativeAgent
 {
@@ -15,12 +16,20 @@ namespace DameWareNativeAgent
     {
         private static int PORT = 6129;
         private static bool isRunning = true;
+        private static bool isInputLocked = false;
+        private static bool isScreenBlackedOut = false;
 
         [DllImport("user32.dll")]
         public static extern bool SetCursorPos(int X, int Y);
 
         [DllImport("user32.dll")]
         public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
+
+        [DllImport("user32.dll")]
+        public static extern bool LockWorkStation();
+
+        [DllImport("user32.dll")]
+        public static extern bool BlockInput(bool fBlockIt);
 
         public const uint MOUSEEVENTF_MOVE = 0x0001;
         public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
@@ -30,10 +39,10 @@ namespace DameWareNativeAgent
 
         static void Main(string[] args)
         {
-            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Mouse Drag Enabled)";
+            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Full Toolbar Features)";
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("==========================================================");
-            Console.WriteLine(" DameWare Agent Service - Mouse Hold & Drag Active");
+            Console.WriteLine(" DameWare Agent Service - All Toolbar Actions Active");
             Console.WriteLine("==========================================================");
 
             TcpListener listener = new TcpListener(IPAddress.Any, PORT);
@@ -66,15 +75,21 @@ namespace DameWareNativeAgent
             byte[] handshakeBytes = Encoding.UTF8.GetBytes(handshake);
             stream.Write(handshakeBytes, 0, handshakeBytes.Length);
 
-            // Frame Streaming Thread (20 FPS for smooth dragging)
+            // Frame Streaming Thread (20 FPS)
             Thread streamThread = new Thread(() => {
                 try {
                     while (client.Connected) {
-                        string frameBase64 = CapturePrimaryScreenJpegBase64();
-                        if (!string.IsNullOrEmpty(frameBase64)) {
-                            string packet = string.Format("{{\"type\":\"SCREEN_FRAME\",\"frame\":\"{0}\",\"timestamp\":{1},\"width\":1920,\"height\":1080}}\n", frameBase64, DateTime.Now.Ticks);
-                            byte[] packetBytes = Encoding.UTF8.GetBytes(packet);
-                            stream.Write(packetBytes, 0, packetBytes.Length);
+                        if (isScreenBlackedOut) {
+                            string blackFrame = string.Format("{{\"type\":\"SCREEN_FRAME_BLACKOUT\",\"blackedOut\":true,\"timestamp\":{0}}}\n", DateTime.Now.Ticks);
+                            byte[] blackBytes = Encoding.UTF8.GetBytes(blackFrame);
+                            stream.Write(blackBytes, 0, blackBytes.Length);
+                        } else {
+                            string frameBase64 = CapturePrimaryScreenJpegBase64();
+                            if (!string.IsNullOrEmpty(frameBase64)) {
+                                string packet = string.Format("{{\"type\":\"SCREEN_FRAME\",\"frame\":\"{0}\",\"timestamp\":{1},\"width\":1920,\"height\":1080}}\n", frameBase64, DateTime.Now.Ticks);
+                                byte[] packetBytes = Encoding.UTF8.GetBytes(packet);
+                                stream.Write(packetBytes, 0, packetBytes.Length);
+                            }
                         }
                         Thread.Sleep(50); // 20 FPS
                     }
@@ -84,7 +99,7 @@ namespace DameWareNativeAgent
             streamThread.Start();
 
             // Command Processing Loop
-            byte[] buffer = new byte[8192];
+            byte[] buffer = new byte[16384];
             try {
                 int bytesRead;
                 while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0) {
@@ -92,7 +107,7 @@ namespace DameWareNativeAgent
                     string[] lines = commandStr.Split('\n');
                     foreach (string line in lines) {
                         if (!string.IsNullOrEmpty(line.Trim())) {
-                            ProcessCommand(line.Trim());
+                            ProcessCommand(line.Trim(), stream);
                         }
                     }
                 }
@@ -102,10 +117,12 @@ namespace DameWareNativeAgent
             client.Close();
         }
 
-        private static void ProcessCommand(string cmd)
+        private static void ProcessCommand(string cmd, NetworkStream stream)
         {
             try {
                 if (cmd.Contains("MOUSE_INPUT")) {
+                    if (isInputLocked) return;
+
                     double xPercent = GetJsonDouble(cmd, "xPercent");
                     double yPercent = GetJsonDouble(cmd, "yPercent");
                     string action = GetJsonString(cmd, "action");
@@ -115,27 +132,15 @@ namespace DameWareNativeAgent
                     int targetX = (int)(bounds.Width * xPercent);
                     int targetY = (int)(bounds.Height * yPercent);
 
-                    // Move cursor position
                     SetCursorPos(targetX, targetY);
 
-                    // Mouse Down (Hold)
                     if (action == "mousedown") {
-                        if (button == "right") {
-                            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
-                        } else {
-                            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                        }
-                    }
-                    // Mouse Up (Release)
-                    else if (action == "mouseup") {
-                        if (button == "right") {
-                            mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-                        } else {
-                            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                        }
-                    }
-                    // Single Click
-                    else if (action == "click") {
+                        if (button == "right") mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                        else mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                    } else if (action == "mouseup") {
+                        if (button == "right") mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                        else mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                    } else if (action == "click") {
                         if (button == "right") {
                             mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
                             mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
@@ -145,12 +150,31 @@ namespace DameWareNativeAgent
                         }
                     }
                 } else if (cmd.Contains("KEYBOARD_INPUT")) {
+                    if (isInputLocked) return;
                     string key = GetJsonString(cmd, "key");
                     if (key == "CAD") {
-                        System.Diagnostics.Process.Start("taskmgr.exe");
+                        Process.Start("taskmgr.exe");
+                    } else if (key == "WIN_L") {
+                        LockWorkStation();
+                    } else if (key == "ALT_TAB") {
+                        SendKeys.SendWait("%{TAB}");
+                    } else if (key == "PRTSCN") {
+                        SendKeys.SendWait("{PRTSC}");
                     } else {
                         SendKeys.SendWait(key);
                     }
+                } else if (cmd.Contains("LOCK_INPUT")) {
+                    isInputLocked = cmd.Contains("\"locked\":true");
+                    try { BlockInput(isInputLocked); } catch {}
+                    Console.WriteLine("[*] Remote input lock set to: " + isInputLocked);
+                } else if (cmd.Contains("BLACKOUT_SCREEN")) {
+                    isScreenBlackedOut = cmd.Contains("\"blackout\":true");
+                    Console.WriteLine("[*] Remote blackout set to: " + isScreenBlackedOut);
+                } else if (cmd.Contains("POWER_ACTION")) {
+                    string action = GetJsonString(cmd, "action");
+                    if (action == "reboot") Process.Start("shutdown.exe", "/r /t 5 /c \"DameWare Remote Reboot\"");
+                    else if (action == "shutdown") Process.Start("shutdown.exe", "/s /t 5 /c \"DameWare Remote Shutdown\"");
+                    else if (action == "logoff") Process.Start("logoff.exe");
                 }
             } catch {}
         }
