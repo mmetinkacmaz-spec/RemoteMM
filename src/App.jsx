@@ -42,6 +42,7 @@ export default function App() {
 
   // Mouse Holding / Dragging state
   const isMousePressedRef = useRef(false);
+  const canvasRef = useRef(null);
 
   // Persistent Host Directory State
   const [savedHosts, setSavedHosts] = useState(() => {
@@ -166,6 +167,8 @@ export default function App() {
           setAgentInfo(data);
           setDeployStatus(null);
           setConnectionError(null);
+          // Focus canvas automatically for keyboard typing
+          setTimeout(() => { if (canvasRef.current) canvasRef.current.focus(); }, 300);
         } else if (data.type === 'SCREEN_FRAME') {
           if (data.frame) {
             setFrameSrc(`data:image/jpeg;base64,${data.frame}`);
@@ -208,7 +211,36 @@ export default function App() {
     setFrameSvg(null);
   };
 
-  // 1. TOOLBAR ACTION: SEND KEYS (EXACT WIN32 SEQUENCES)
+  // REAL-TIME KEYBOARD EVENT HANDLER (FORWARDS ALL CANVAS TYPING TO REMOTE PC)
+  const handleKeyDown = (e) => {
+    if (!isConnected || isViewOnly) return;
+
+    // Do not capture if typing inside modals or input boxes
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+    let keyToSend = e.key;
+
+    // Translate Special Navigation & Editing Keys for C# SendKeys
+    if (e.key === 'Enter') keyToSend = '{ENTER}';
+    else if (e.key === 'Backspace') keyToSend = '{BACKSPACE}';
+    else if (e.key === 'Tab') { keyToSend = '{TAB}'; e.preventDefault(); }
+    else if (e.key === 'Escape') keyToSend = '{ESC}';
+    else if (e.key === 'Delete') keyToSend = '{DELETE}';
+    else if (e.key === 'ArrowUp') keyToSend = '{UP}';
+    else if (e.key === 'ArrowDown') keyToSend = '{DOWN}';
+    else if (e.key === 'ArrowLeft') keyToSend = '{LEFT}';
+    else if (e.key === 'ArrowRight') keyToSend = '{RIGHT}';
+    else if (e.key === 'Space' || e.key === ' ') keyToSend = ' ';
+    else if (e.key.length > 1) return; // Skip function keys / modifier-only events
+
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({
+        type: 'KEYBOARD_INPUT',
+        key: keyToSend
+      }));
+    }
+  };
+
   const sendSpecialKey = (keyName) => {
     setSendKeysOpen(false);
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
@@ -219,7 +251,6 @@ export default function App() {
     }
   };
 
-  // 2. TOOLBAR ACTION: LOCK REMOTE MOUSE & KEYBOARD
   const toggleLockInput = () => {
     const nextState = !isInputLocked;
     setIsInputLocked(nextState);
@@ -231,7 +262,6 @@ export default function App() {
     }
   };
 
-  // 3. TOOLBAR ACTION: BLACKOUT REMOTE SCREEN
   const toggleBlackoutScreen = () => {
     const nextState = !isScreenBlackedOut;
     setIsScreenBlackedOut(nextState);
@@ -243,7 +273,6 @@ export default function App() {
     }
   };
 
-  // 4. TOOLBAR ACTION: POWER CONTROLS
   const sendPowerAction = (actionType) => {
     if (confirm(`Uzak sunucuda [${actionType.toUpperCase()}] işlemini onaylıyor musunuz?`)) {
       if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
@@ -256,7 +285,6 @@ export default function App() {
     }
   };
 
-  // 5. TOOLBAR ACTION: CHAT MESSAGE
   const handleSendChat = (e) => {
     e.preventDefault();
     if (!chatInput.trim()) return;
@@ -278,7 +306,6 @@ export default function App() {
     setChatInput('');
   };
 
-  // 6. TOOLBAR ACTION: KILL PROCESS IN TASK MANAGER
   const handleKillProcess = (processId) => {
     setProcesses(prev => prev.filter(p => p.Id !== processId));
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
@@ -308,6 +335,7 @@ export default function App() {
 
   const handleMouseDown = (e) => {
     isMousePressedRef.current = true;
+    if (canvasRef.current) canvasRef.current.focus();
     sendMouseInput('mousedown', e);
   };
 
@@ -400,7 +428,7 @@ export default function App() {
               DameWare Mini Remote Control <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono">v12.2 Enterprise</span>
             </h1>
             <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
-              <Shield className="w-3 h-3 text-emerald-400" /> Win32 Keybd Event & Remote Input Fix Active
+              <Shield className="w-3 h-3 text-emerald-400" /> Real-Time Canvas Keyboard Typing Active
             </p>
           </div>
         </div>
@@ -466,7 +494,6 @@ export default function App() {
 
           <div className="h-5 w-px bg-slate-800 mx-1"></div>
 
-          {/* LOCK REMOTE PHYSICAL INPUT */}
           <button
             onClick={toggleLockInput}
             className={`p-1.5 rounded text-xs flex items-center gap-1 border transition ${
@@ -477,7 +504,6 @@ export default function App() {
             {isInputLocked ? <Unlock className="w-3.5 h-3.5 text-amber-400" /> : <Lock className="w-3.5 h-3.5" />}
           </button>
 
-          {/* BLACKOUT REMOTE DISPLAY */}
           <button
             onClick={toggleBlackoutScreen}
             className={`p-1.5 rounded text-xs flex items-center gap-1 border transition ${
@@ -696,12 +722,12 @@ export default function App() {
           </div>
 
           <div className="p-2 border-t border-slate-800 bg-slate-950/60 text-[10px] text-slate-500 flex justify-between">
-            <span>Win32 Keybd API: Native</span>
+            <span>Canvas Keyboard: Active</span>
             <span>Port: 6129</span>
           </div>
         </aside>
 
-        {/* CENTER VIEWPORT / REMOTE DESKTOP CANVAS */}
+        {/* CENTER VIEWPORT / REMOTE DESKTOP CANVAS WITH KEYBOARD LISTENER */}
         <main className="flex-1 bg-[#050811] flex flex-col relative overflow-hidden">
           
           {/* Sub-Header Bar */}
@@ -752,16 +778,19 @@ export default function App() {
             </div>
           </div>
 
-          {/* CANVAS DISPLAY AREA */}
+          {/* CANVAS DISPLAY AREA WITH KEYDOWN & FOCUS HANDLERS */}
           <div className="flex-1 relative flex items-center justify-center overflow-auto p-2">
             {isConnected ? (
               <div
-                className={`relative border border-slate-800 rounded shadow-2xl overflow-hidden cursor-crosshair ${
+                ref={canvasRef}
+                tabIndex={0}
+                className={`relative border border-slate-800 rounded shadow-2xl overflow-hidden cursor-crosshair outline-none focus:border-sky-500 ${
                   scaleMode === 'fit' ? 'max-w-full max-h-full aspect-video' : ''
                 }`}
                 onMouseDown={handleMouseDown}
                 onMouseUp={handleMouseUp}
                 onMouseMove={handleMouseMove}
+                onKeyDown={handleKeyDown}
                 onContextMenu={(e) => { e.preventDefault(); sendMouseInput('click', e); }}
               >
                 {frameSrc && (

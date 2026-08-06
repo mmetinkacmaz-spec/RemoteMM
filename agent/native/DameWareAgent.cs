@@ -54,10 +54,10 @@ namespace DameWareNativeAgent
 
         static void Main(string[] args)
         {
-            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Win32 Keyboard & Input Fix)";
+            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Full Remote Typing Active)";
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("==========================================================");
-            Console.WriteLine(" DameWare Agent Service - Win32 Keyboard & Input Active");
+            Console.WriteLine(" DameWare Agent Service - Full Remote Typing Active");
             Console.WriteLine("==========================================================");
 
             TcpListener listener = new TcpListener(IPAddress.Any, PORT);
@@ -145,7 +145,6 @@ namespace DameWareNativeAgent
                     int targetX = (int)(bounds.Width * xPercent);
                     int targetY = (int)(bounds.Height * yPercent);
 
-                    // Unblock BlockInput temporarily so remote simulated mouse moves freely
                     if (isInputLocked) {
                         try { BlockInput(false); } catch {}
                     }
@@ -168,7 +167,6 @@ namespace DameWareNativeAgent
                         }
                     }
 
-                    // Re-engage BlockInput to lock physical target inputs
                     if (isInputLocked) {
                         try { BlockInput(true); } catch {}
                     }
@@ -176,7 +174,11 @@ namespace DameWareNativeAgent
                 else if (cmd.Contains("KEYBOARD_INPUT")) {
                     string key = GetJsonString(cmd, "key");
 
-                    // 1. CTRL + ALT + DEL (Simulate Win32 Key Sequence)
+                    if (isInputLocked) {
+                        try { BlockInput(false); } catch {}
+                    }
+
+                    // 1. SPECIAL SHORTCUTS
                     if (key == "CAD") {
                         keybd_event(VK_CONTROL, 0, 0, 0);
                         keybd_event(VK_MENU, 0, 0, 0);
@@ -185,23 +187,12 @@ namespace DameWareNativeAgent
                         keybd_event(VK_DELETE, 0, KEYEVENTF_KEYUP, 0);
                         keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
                         keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
-                        Console.WriteLine("[*] Simulated Ctrl+Alt+Del executed.");
                     }
-                    // 2. WINDOWS + L (Lock Workstation)
                     else if (key == "WIN_L") {
                         ThreadPool.QueueUserWorkItem((o) => {
-                            try {
-                                LockWorkStation();
-                                keybd_event(VK_LWIN, 0, 0, 0);
-                                keybd_event(VK_L, 0, 0, 0);
-                                Thread.Sleep(50);
-                                keybd_event(VK_L, 0, KEYEVENTF_KEYUP, 0);
-                                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
-                            } catch {}
+                            try { LockWorkStation(); } catch {}
                         });
-                        Console.WriteLine("[*] Lock Workstation (Win+L) executed.");
                     }
-                    // 3. WINDOWS + TAB & ALT + TAB
                     else if (key == "WIN_TAB" || key == "ALT_TAB") {
                         if (key == "WIN_TAB") {
                             keybd_event(VK_LWIN, 0, 0, 0);
@@ -216,17 +207,25 @@ namespace DameWareNativeAgent
                             keybd_event(VK_TAB, 0, KEYEVENTF_KEYUP, 0);
                             keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
                         }
-                        Console.WriteLine("[*] Switcher (Win+Tab / Alt+Tab) executed.");
                     }
-                    // 4. PRINT SCREEN
                     else if (key == "PRTSCN") {
                         keybd_event(VK_SNAPSHOT, 0, 0, 0);
                         Thread.Sleep(50);
                         keybd_event(VK_SNAPSHOT, 0, KEYEVENTF_KEYUP, 0);
-                        Console.WriteLine("[*] PrintScreen key executed.");
                     }
-                    else {
-                        SendKeys.SendWait(key);
+                    // 2. STANDARD REAL-TIME KEYBOARD TYPING
+                    else if (!string.IsNullOrEmpty(key)) {
+                        try {
+                            SendKeys.SendWait(key);
+                        } catch {
+                            // Fallback for special characters that SendKeys escapes
+                            string escapedKey = EscapeSendKeys(key);
+                            try { SendKeys.SendWait(escapedKey); } catch {}
+                        }
+                    }
+
+                    if (isInputLocked) {
+                        try { BlockInput(true); } catch {}
                     }
                 } 
                 else if (cmd.Contains("LOCK_INPUT")) {
@@ -247,6 +246,15 @@ namespace DameWareNativeAgent
             } catch (Exception ex) {
                 Console.WriteLine("[-] Command error: " + ex.Message);
             }
+        }
+
+        private static string EscapeSendKeys(string key)
+        {
+            if (key == "+" || key == "^" || key == "%" || key == "~" || key == "(" || key == ")" || key == "{" || key == "}" || key == "[" || key == "]")
+            {
+                return "{" + key + "}";
+            }
+            return key;
         }
 
         private static double GetJsonDouble(string json, string key)
