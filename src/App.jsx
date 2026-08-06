@@ -6,7 +6,6 @@ import {
   X, Check, AlertTriangle, Send, Activity, User, HardDrive, Plus, Zap, Edit3, AlertCircle
 } from 'lucide-react';
 
-// LocalStorage key for persistence
 const LOCAL_STORAGE_KEY = 'dameware_saved_hosts_v1';
 
 export default function App() {
@@ -51,7 +50,6 @@ export default function App() {
         return JSON.parse(stored);
       }
     } catch (e) {}
-    // Clean default list without dummy hosts
     return [
       {
         domain: 'KAYITLI SUNUCULARIM (My Saved Hosts)',
@@ -62,7 +60,6 @@ export default function App() {
     ];
   });
 
-  // Save hosts to localStorage whenever savedHosts changes
   useEffect(() => {
     try {
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(savedHosts));
@@ -78,18 +75,15 @@ export default function App() {
   const [newHostDomain, setNewHostDomain] = useState('WORKGROUP');
   const [newHostOs, setNewHostOs] = useState('Windows 11 Pro');
 
-  // Subnet Scanner State
   const [scanSubnet, setScanSubnet] = useState('192.168.1');
   const [scanResults, setScanResults] = useState([]);
   const [isScanning, setIsScanning] = useState(false);
 
-  // Chat State
   const [chatMessages, setChatMessages] = useState([
     { sender: 'System', text: 'DameWare Encrypted Session established on Port 6129.', time: new Date().toLocaleTimeString() }
   ]);
   const [chatInput, setChatInput] = useState('');
 
-  // File Manager State
   const [remotePath, setRemotePath] = useState('C:\\');
   const [remoteFiles, setRemoteFiles] = useState([
     { name: 'Program Files', isDirectory: true, size: 0, modified: '2026-08-01' },
@@ -102,7 +96,18 @@ export default function App() {
 
   const socketRef = useRef(null);
 
+  // SINGLE ACTIVE CONNECTION ENFORCER & INSTANT PREVIOUS SESSION CANCELER
   const handleConnect = (hostObj = null) => {
+    // 1. INSTANT CLEANUP OF PREVIOUS SESSION & SOCKETS
+    if (socketRef.current) {
+      console.log('[Console] Terminating previous connection attempt...');
+      socketRef.current.onclose = null;
+      socketRef.current.onerror = null;
+      socketRef.current.onmessage = null;
+      socketRef.current.close();
+      socketRef.current = null;
+    }
+
     let target = targetHost;
     let p = targetPort;
     let d = authDomain;
@@ -125,18 +130,22 @@ export default function App() {
 
     if (!target.trim()) return;
 
+    // 2. RESET VIEWPORT & STREAM BUFFERS IMMEDIATELY
+    setIsConnected(false);
     setIsConnecting(true);
     setConnectionError(null);
     setDeployStatus(null);
     setFrameSrc(null);
     setFrameSvg(null);
+    setAgentInfo(null);
 
+    // 3. INITIATE ONLY THE LATEST REQUESTED CONNECTION
     const wsUrl = `ws://localhost:3001/?host=${target}&port=${p}&domain=${encodeURIComponent(d)}&username=${encodeURIComponent(u)}&password=${encodeURIComponent(pass)}`;
     const ws = new WebSocket(wsUrl);
     socketRef.current = ws;
 
     ws.onopen = () => {
-      console.log('Connected to Gateway Socket');
+      console.log(`[Console] Gateway connected for target: ${target}`);
     };
 
     ws.onmessage = (event) => {
@@ -184,9 +193,14 @@ export default function App() {
 
   const handleDisconnect = () => {
     if (socketRef.current) {
+      socketRef.current.onclose = null;
+      socketRef.current.onerror = null;
+      socketRef.current.onmessage = null;
       socketRef.current.close();
+      socketRef.current = null;
     }
     setIsConnected(false);
+    setIsConnecting(false);
     setAgentInfo(null);
     setFrameSrc(null);
     setFrameSvg(null);
@@ -357,7 +371,7 @@ export default function App() {
               DameWare Mini Remote Control <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono">v12.2 Enterprise</span>
             </h1>
             <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
-              <Shield className="w-3 h-3 text-emerald-400" /> Persistent Storage (LocalStorage) Active
+              <Shield className="w-3 h-3 text-emerald-400" /> Single Active Connection & Background Auto-Cancel Active
             </p>
           </div>
         </div>
@@ -657,7 +671,7 @@ export default function App() {
           </div>
 
           <div className="p-2 border-t border-slate-800 bg-slate-950/60 text-[10px] text-slate-500 flex justify-between">
-            <span>Persistent Storage: Active</span>
+            <span>Single Session: Enforced</span>
             <span>Port: 6129</span>
           </div>
         </aside>

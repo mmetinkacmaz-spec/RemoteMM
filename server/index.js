@@ -14,7 +14,6 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', service: 'DameWare Console Gateway', port: PORT });
 });
 
-// Automatic Remote Push Deployer API Endpoint
 app.post('/api/agent/deploy', async (req, res) => {
   const { targetHost, domain, username, password, port } = req.body;
   try {
@@ -33,42 +32,47 @@ wss.on('connection', (ws, req) => {
   const targetHost = params.get('host') || '127.0.0.1';
   const targetPort = parseInt(params.get('port') || '6129', 10);
 
-  console.log(`[Gateway] Console requesting connection to Agent TCP on ${targetHost}:${targetPort}...`);
+  console.log(`[Gateway] Single Active Session: Connecting to ${targetHost}:${targetPort}...`);
 
   let isConnected = false;
+  let isCancelled = false;
   let tcpClient = new net.Socket();
   let buffer = '';
 
-  // Set 5-second timeout for rapid error reporting
-  tcpClient.setTimeout(5000);
+  tcpClient.setTimeout(4000);
 
   tcpClient.connect(targetPort, targetHost, () => {
+    if (isCancelled) {
+      tcpClient.destroy();
+      return;
+    }
     isConnected = true;
-    console.log(`[Gateway] Successfully connected to Agent on ${targetHost}:${targetPort}`);
+    console.log(`[Gateway] Active TCP session established with ${targetHost}:${targetPort}`);
   });
 
   tcpClient.on('data', (chunk) => {
+    if (isCancelled) return;
     buffer += chunk.toString('utf8');
     let lines = buffer.split('\n');
-    buffer = lines.pop(); // Retain incomplete chunk
+    buffer = lines.pop();
 
     for (let line of lines) {
-      if (line.trim() && ws.readyState === WebSocket.OPEN) {
+      if (line.trim() && ws.readyState === WebSocket.OPEN && !isCancelled) {
         ws.send(line.trim());
       }
     }
   });
 
   tcpClient.on('timeout', () => {
-    if (!isConnected) {
-      console.log(`[Gateway] Connection timed out for ${targetHost}:${targetPort}`);
+    if (!isConnected && !isCancelled) {
+      console.log(`[Gateway] Connection timeout for ${targetHost}:${targetPort}`);
       sendErrorToConsole(ws, 'ERR_CONNECTION_TIMED_OUT', `Connecting to ${targetHost}:${targetPort} timed out. Verify target IP and Firewall Port 6129.`);
       tcpClient.destroy();
     }
   });
 
   tcpClient.on('error', (err) => {
-    if (!isConnected) {
+    if (!isConnected && !isCancelled) {
       console.log(`[Gateway] Connection error for ${targetHost}:${targetPort}: ${err.message}`);
       let code = 'ERR_CONNECTION_FAILED';
       if (err.code === 'ECONNREFUSED') code = 'ERR_CONNECTION_REFUSED';
@@ -80,16 +84,20 @@ wss.on('connection', (ws, req) => {
   });
 
   tcpClient.on('close', () => {
-    if (isConnected && ws.readyState === WebSocket.OPEN) {
+    if (isConnected && ws.readyState === WebSocket.OPEN && !isCancelled) {
       ws.close();
     }
   });
 
-  // Forward Console commands to Agent
   ws.on('message', (message) => {
-    if (isConnected && tcpClient.writable) {
+    if (isConnected && tcpClient.writable && !isCancelled) {
       tcpClient.write(message.toString() + '\n');
     }
+  });
+
+  ws.on('close', () => {
+    isCancelled = true;
+    tcpClient.destroy();
   });
 });
 
