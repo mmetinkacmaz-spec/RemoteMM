@@ -55,7 +55,7 @@ export default function App() {
       {
         domain: 'KAYITLI SUNUCULARIM (My Saved Hosts)',
         hosts: [
-          { id: 1, name: 'MAKINE1 (Sanal Sunucu)', ip: 'MAKINE1', port: '6129', domain: 'WORKGROUP', user: 'Makine', pass: '', status: 'ONLINE', os: 'Windows 11 Pro' }
+          { id: 'host-1', name: 'MAKINE1 (Sanal Sunucu)', ip: 'MAKINE1', port: '6129', domain: 'WORKGROUP', user: 'Makine', pass: '', status: 'ONLINE', os: 'Windows 11 Pro' }
         ]
       }
     ];
@@ -90,8 +90,7 @@ export default function App() {
   const [remoteFiles, setRemoteFiles] = useState([
     { name: 'Program Files', isDirectory: true, size: 0, modified: '2026-08-01' },
     { name: 'Windows', isDirectory: true, size: 0, modified: '2026-08-01' },
-    { name: 'DameWare_Agent.exe', isDirectory: false, size: 1450200, modified: '2026-08-06' },
-    { name: 'SystemConfig.log', isDirectory: false, size: 45200, modified: '2026-08-06' }
+    { name: 'DameWare_Agent.exe', isDirectory: false, size: 1450200, modified: '2026-08-06' }
   ]);
 
   // Processes State
@@ -209,7 +208,7 @@ export default function App() {
     setFrameSvg(null);
   };
 
-  // 1. TOOLBAR ACTION: SEND KEYS
+  // 1. TOOLBAR ACTION: SEND KEYS (EXACT WIN32 SEQUENCES)
   const sendSpecialKey = (keyName) => {
     setSendKeysOpen(false);
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
@@ -217,8 +216,6 @@ export default function App() {
         type: 'KEYBOARD_INPUT',
         key: keyName
       }));
-    } else {
-      alert(`[Send Keys] Tuş gönderildi: ${keyName}`);
     }
   };
 
@@ -255,7 +252,6 @@ export default function App() {
           action: actionType
         }));
       }
-      alert(`Power Action [${actionType}] komutu uzak sunucuya iletildi.`);
       setActiveModal(null);
     }
   };
@@ -294,7 +290,7 @@ export default function App() {
   };
 
   const sendMouseInput = (action, e) => {
-    if (!isConnected || isViewOnly || isInputLocked) return;
+    if (!isConnected || isViewOnly) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const xPercent = (e.clientX - rect.left) / rect.width;
     const yPercent = (e.clientY - rect.top) / rect.height;
@@ -362,7 +358,7 @@ export default function App() {
     if (!newHostName.trim() || !newHostIp.trim()) return;
 
     const newEntry = {
-      id: Date.now(),
+      id: `host-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       name: newHostName,
       ip: newHostIp,
       port: '6129',
@@ -404,7 +400,7 @@ export default function App() {
               DameWare Mini Remote Control <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono">v12.2 Enterprise</span>
             </h1>
             <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
-              <Shield className="w-3 h-3 text-emerald-400" /> Full Interactive Toolbar Active
+              <Shield className="w-3 h-3 text-emerald-400" /> Win32 Keybd Event & Remote Input Fix Active
             </p>
           </div>
         </div>
@@ -436,10 +432,9 @@ export default function App() {
           </div>
         )}
 
-        {/* FULLY FUNCTIONAL TOOLBAR ACTIONS (ALL 7 BUTTONS ENABLED) */}
+        {/* TOOLBAR ACTIONS */}
         <div className="flex items-center gap-1">
           
-          {/* 1. SEND KEYS DROPDOWN */}
           <div className="relative">
             <button
               onClick={() => setSendKeysOpen(!sendKeysOpen)}
@@ -449,15 +444,18 @@ export default function App() {
               <Key className="w-3.5 h-3.5 text-amber-400" /> Send Keys <ChevronDown className="w-3 h-3 text-slate-400" />
             </button>
             {sendKeysOpen && (
-              <div className="absolute left-0 top-full mt-1 flex flex-col bg-slate-900 border border-slate-800 rounded-lg shadow-xl py-1 z-50 min-w-[180px]">
+              <div className="absolute left-0 top-full mt-1 flex flex-col bg-slate-900 border border-slate-800 rounded-lg shadow-xl py-1 z-50 min-w-[200px]">
                 <button onClick={() => sendSpecialKey('CAD')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
-                  <Key className="w-3.5 h-3.5 text-amber-400" /> Ctrl + Alt + Del
+                  <Key className="w-3.5 h-3.5 text-amber-400" /> Ctrl + Alt + Del (Security)
                 </button>
                 <button onClick={() => sendSpecialKey('WIN_L')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
                   <Lock className="w-3.5 h-3.5 text-sky-400" /> Lock Workstation (Win+L)
                 </button>
+                <button onClick={() => sendSpecialKey('WIN_TAB')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
+                  <Monitor className="w-3.5 h-3.5 text-purple-400" /> Task Switcher (Win+Tab)
+                </button>
                 <button onClick={() => sendSpecialKey('ALT_TAB')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
-                  <Monitor className="w-3.5 h-3.5 text-purple-400" /> Alt + Tab Switcher
+                  <Monitor className="w-3.5 h-3.5 text-slate-400" /> Alt + Tab Switcher
                 </button>
                 <button onClick={() => sendSpecialKey('PRTSCN')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
                   <Camera className="w-3.5 h-3.5 text-emerald-400" /> Print Screen
@@ -468,18 +466,18 @@ export default function App() {
 
           <div className="h-5 w-px bg-slate-800 mx-1"></div>
 
-          {/* 2. LOCK REMOTE INPUT */}
+          {/* LOCK REMOTE PHYSICAL INPUT */}
           <button
             onClick={toggleLockInput}
             className={`p-1.5 rounded text-xs flex items-center gap-1 border transition ${
               isInputLocked ? 'bg-amber-500/20 text-amber-400 border-amber-500/50 shadow-lg shadow-amber-500/10' : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
             }`}
-            title={isInputLocked ? "Unlock Remote Input" : "Lock Remote Mouse & Keyboard"}
+            title={isInputLocked ? "Unlock Remote Physical Mouse/Keyboard" : "Lock Remote Physical Mouse/Keyboard"}
           >
             {isInputLocked ? <Unlock className="w-3.5 h-3.5 text-amber-400" /> : <Lock className="w-3.5 h-3.5" />}
           </button>
 
-          {/* 3. BLACKOUT REMOTE SCREEN */}
+          {/* BLACKOUT REMOTE DISPLAY */}
           <button
             onClick={toggleBlackoutScreen}
             className={`p-1.5 rounded text-xs flex items-center gap-1 border transition ${
@@ -492,7 +490,6 @@ export default function App() {
 
           <div className="h-5 w-px bg-slate-800 mx-1"></div>
 
-          {/* 4. FILE TRANSFER MANAGER */}
           <button
             onClick={() => setActiveModal('files')}
             className={`p-1.5 rounded border text-xs flex items-center gap-1 transition ${
@@ -503,7 +500,6 @@ export default function App() {
             <Folder className="w-3.5 h-3.5 text-sky-400" />
           </button>
 
-          {/* 5. IN-SESSION CHAT WINDOW */}
           <button
             onClick={() => setActiveModal('chat')}
             className={`p-1.5 rounded border text-xs flex items-center gap-1 transition ${
@@ -514,7 +510,6 @@ export default function App() {
             <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
           </button>
 
-          {/* 6. REMOTE TASK MANAGER */}
           <button
             onClick={() => setActiveModal('taskmgr')}
             className={`p-1.5 rounded border text-xs flex items-center gap-1 transition ${
@@ -525,7 +520,6 @@ export default function App() {
             <Cpu className="w-3.5 h-3.5 text-purple-400" />
           </button>
 
-          {/* 7. REMOTE POWER CONTROLS */}
           <button
             onClick={() => setActiveModal('power')}
             className={`p-1.5 rounded border text-xs flex items-center gap-1 transition ${
@@ -546,17 +540,6 @@ export default function App() {
           </button>
         </div>
       </header>
-
-      {/* AUTO DEPLOYMENT NOTIFICATION TOAST */}
-      {deployStatus && (
-        <div className="bg-sky-900/90 text-sky-200 border-b border-sky-700/50 px-4 py-2 text-xs flex items-center justify-between animate-pulse">
-          <div className="flex items-center gap-2">
-            <RefreshCw className="w-3.5 h-3.5 animate-spin text-sky-400" />
-            <span>{deployStatus}</span>
-          </div>
-          <span className="text-[10px] font-mono bg-sky-950 px-2 py-0.5 rounded text-sky-300">Auto-Push Engine</span>
-        </div>
-      )}
 
       {/* MAIN CONTAINER */}
       <div className="flex flex-1 overflow-hidden">
@@ -664,14 +647,14 @@ export default function App() {
             ) : (
               <div className="space-y-3">
                 {savedHosts.map((group, idx) => (
-                  <div key={idx} className="space-y-1">
+                  <div key={`group-${idx}`} className="space-y-1">
                     <div className="text-[11px] font-medium text-slate-400 flex items-center gap-1">
                       <ChevronDown className="w-3 h-3" /> {group.domain}
                     </div>
                     <div className="pl-2 space-y-1 border-l border-slate-800">
                       {group.hosts.map((h, i) => (
                         <div
-                          key={h.id || i}
+                          key={`host-${h.id || i}`}
                           className="group flex items-center justify-between p-2 rounded hover:bg-slate-800/80 transition border border-transparent hover:border-slate-700/50"
                         >
                           <div className="flex items-center gap-2 cursor-pointer flex-1" onClick={() => handleConnect(h)}>
@@ -713,7 +696,7 @@ export default function App() {
           </div>
 
           <div className="p-2 border-t border-slate-800 bg-slate-950/60 text-[10px] text-slate-500 flex justify-between">
-            <span>Toolbar Actions: Enabled</span>
+            <span>Win32 Keybd API: Native</span>
             <span>Port: 6129</span>
           </div>
         </aside>
@@ -791,7 +774,7 @@ export default function App() {
 
                 {isInputLocked && (
                   <div className="absolute top-4 left-4 bg-amber-500/90 text-slate-950 px-3 py-1 rounded font-bold text-xs flex items-center gap-1.5 shadow-lg animate-pulse">
-                    <Lock className="w-3.5 h-3.5" /> REMOTE MOUSE & KEYBOARD LOCKED BY ADMIN
+                    <Lock className="w-3.5 h-3.5" /> REMOTE PHYSICAL INPUT BLOCKED (ADMIN CONTROL ACTIVE)
                   </div>
                 )}
 
@@ -845,7 +828,6 @@ export default function App() {
       </div>
 
       {/* MODALS */}
-      {/* 4. FILE TRANSFER MODAL */}
       {activeModal === 'files' && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[850px] h-[550px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
@@ -865,15 +847,6 @@ export default function App() {
                     <span className="flex items-center gap-1.5">📄 DameWare_Agent.exe</span>
                     <span className="font-mono text-[10px] text-slate-500">1.4 MB</span>
                   </div>
-                  <div className="p-2 hover:bg-slate-800 rounded flex justify-between text-slate-300">
-                    <span className="flex items-center gap-1.5">📄 DeploymentScript.ps1</span>
-                    <span className="font-mono text-[10px] text-slate-500">12 KB</span>
-                  </div>
-                </div>
-                <div className="p-2 border-t border-slate-800 bg-slate-900/30 flex justify-end">
-                  <button className="px-3 py-1 bg-sky-600 hover:bg-sky-500 text-white text-xs rounded flex items-center gap-1">
-                    <Upload className="w-3 h-3" /> Push File to Remote
-                  </button>
                 </div>
               </div>
               <div className="bg-slate-950/80 rounded border border-slate-800 flex flex-col">
@@ -888,18 +861,12 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                <div className="p-2 border-t border-slate-800 bg-slate-900/30 flex justify-end">
-                  <button className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded flex items-center gap-1">
-                    <Download className="w-3 h-3" /> Download Selected
-                  </button>
-                </div>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* 5. IN-SESSION CHAT MODAL */}
       {activeModal === 'chat' && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[500px] h-[450px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
@@ -939,7 +906,6 @@ export default function App() {
         </div>
       )}
 
-      {/* 6. REMOTE TASK MANAGER MODAL */}
       {activeModal === 'taskmgr' && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[650px] h-[480px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
@@ -996,7 +962,6 @@ export default function App() {
         </div>
       )}
 
-      {/* 7. REMOTE POWER CONTROLS MODAL */}
       {activeModal === 'power' && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[420px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
@@ -1046,7 +1011,6 @@ export default function App() {
         </div>
       )}
 
-      {/* EDIT HOST SETTINGS MODAL */}
       {activeModal === 'editHostSettings' && editingHost && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[500px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
@@ -1151,7 +1115,6 @@ export default function App() {
         </div>
       )}
 
-      {/* ADD HOST MODAL */}
       {activeModal === 'addHost' && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[500px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
@@ -1240,7 +1203,6 @@ export default function App() {
         </div>
       )}
 
-      {/* AGENT DOWNLOAD MODAL */}
       {activeModal === 'agentInstall' && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[650px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">

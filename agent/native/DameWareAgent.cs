@@ -19,6 +19,7 @@ namespace DameWareNativeAgent
         private static bool isInputLocked = false;
         private static bool isScreenBlackedOut = false;
 
+        // WIN32 API DECLARATIONS
         [DllImport("user32.dll")]
         public static extern bool SetCursorPos(int X, int Y);
 
@@ -26,23 +27,37 @@ namespace DameWareNativeAgent
         public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
 
         [DllImport("user32.dll")]
+        public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+
+        [DllImport("user32.dll")]
         public static extern bool LockWorkStation();
 
         [DllImport("user32.dll")]
         public static extern bool BlockInput(bool fBlockIt);
 
+        // MOUSE CONSTANTS
         public const uint MOUSEEVENTF_MOVE = 0x0001;
         public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         public const uint MOUSEEVENTF_LEFTUP = 0x0004;
         public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
         public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
 
+        // KEYBOARD CONSTANTS
+        public const byte VK_CONTROL = 0x11;
+        public const byte VK_MENU = 0x12; // ALT key
+        public const byte VK_DELETE = 0x2E;
+        public const byte VK_LWIN = 0x5B;  // Left Windows Key
+        public const byte VK_TAB = 0x09;
+        public const byte VK_SNAPSHOT = 0x2C; // PrintScreen
+        public const byte VK_L = 0x4C;
+        public const uint KEYEVENTF_KEYUP = 0x0002;
+
         static void Main(string[] args)
         {
-            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Full Toolbar Features)";
+            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Win32 Keyboard & Input Fix)";
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("==========================================================");
-            Console.WriteLine(" DameWare Agent Service - All Toolbar Actions Active");
+            Console.WriteLine(" DameWare Agent Service - Win32 Keyboard & Input Active");
             Console.WriteLine("==========================================================");
 
             TcpListener listener = new TcpListener(IPAddress.Any, PORT);
@@ -107,7 +122,7 @@ namespace DameWareNativeAgent
                     string[] lines = commandStr.Split('\n');
                     foreach (string line in lines) {
                         if (!string.IsNullOrEmpty(line.Trim())) {
-                            ProcessCommand(line.Trim(), stream);
+                            ProcessCommand(line.Trim());
                         }
                     }
                 }
@@ -117,12 +132,10 @@ namespace DameWareNativeAgent
             client.Close();
         }
 
-        private static void ProcessCommand(string cmd, NetworkStream stream)
+        private static void ProcessCommand(string cmd)
         {
             try {
                 if (cmd.Contains("MOUSE_INPUT")) {
-                    if (isInputLocked) return;
-
                     double xPercent = GetJsonDouble(cmd, "xPercent");
                     double yPercent = GetJsonDouble(cmd, "yPercent");
                     string action = GetJsonString(cmd, "action");
@@ -131,6 +144,11 @@ namespace DameWareNativeAgent
                     Rectangle bounds = Screen.PrimaryScreen.Bounds;
                     int targetX = (int)(bounds.Width * xPercent);
                     int targetY = (int)(bounds.Height * yPercent);
+
+                    // Unblock BlockInput temporarily so remote simulated mouse moves freely
+                    if (isInputLocked) {
+                        try { BlockInput(false); } catch {}
+                    }
 
                     SetCursorPos(targetX, targetY);
 
@@ -149,34 +167,86 @@ namespace DameWareNativeAgent
                             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                         }
                     }
-                } else if (cmd.Contains("KEYBOARD_INPUT")) {
-                    if (isInputLocked) return;
+
+                    // Re-engage BlockInput to lock physical target inputs
+                    if (isInputLocked) {
+                        try { BlockInput(true); } catch {}
+                    }
+                } 
+                else if (cmd.Contains("KEYBOARD_INPUT")) {
                     string key = GetJsonString(cmd, "key");
+
+                    // 1. CTRL + ALT + DEL (Simulate Win32 Key Sequence)
                     if (key == "CAD") {
-                        Process.Start("taskmgr.exe");
-                    } else if (key == "WIN_L") {
-                        LockWorkStation();
-                    } else if (key == "ALT_TAB") {
-                        SendKeys.SendWait("%{TAB}");
-                    } else if (key == "PRTSCN") {
-                        SendKeys.SendWait("{PRTSC}");
-                    } else {
+                        keybd_event(VK_CONTROL, 0, 0, 0);
+                        keybd_event(VK_MENU, 0, 0, 0);
+                        keybd_event(VK_DELETE, 0, 0, 0);
+                        Thread.Sleep(50);
+                        keybd_event(VK_DELETE, 0, KEYEVENTF_KEYUP, 0);
+                        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+                        Console.WriteLine("[*] Simulated Ctrl+Alt+Del executed.");
+                    }
+                    // 2. WINDOWS + L (Lock Workstation)
+                    else if (key == "WIN_L") {
+                        ThreadPool.QueueUserWorkItem((o) => {
+                            try {
+                                LockWorkStation();
+                                keybd_event(VK_LWIN, 0, 0, 0);
+                                keybd_event(VK_L, 0, 0, 0);
+                                Thread.Sleep(50);
+                                keybd_event(VK_L, 0, KEYEVENTF_KEYUP, 0);
+                                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+                            } catch {}
+                        });
+                        Console.WriteLine("[*] Lock Workstation (Win+L) executed.");
+                    }
+                    // 3. WINDOWS + TAB & ALT + TAB
+                    else if (key == "WIN_TAB" || key == "ALT_TAB") {
+                        if (key == "WIN_TAB") {
+                            keybd_event(VK_LWIN, 0, 0, 0);
+                            keybd_event(VK_TAB, 0, 0, 0);
+                            Thread.Sleep(50);
+                            keybd_event(VK_TAB, 0, KEYEVENTF_KEYUP, 0);
+                            keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+                        } else {
+                            keybd_event(VK_MENU, 0, 0, 0);
+                            keybd_event(VK_TAB, 0, 0, 0);
+                            Thread.Sleep(50);
+                            keybd_event(VK_TAB, 0, KEYEVENTF_KEYUP, 0);
+                            keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                        }
+                        Console.WriteLine("[*] Switcher (Win+Tab / Alt+Tab) executed.");
+                    }
+                    // 4. PRINT SCREEN
+                    else if (key == "PRTSCN") {
+                        keybd_event(VK_SNAPSHOT, 0, 0, 0);
+                        Thread.Sleep(50);
+                        keybd_event(VK_SNAPSHOT, 0, KEYEVENTF_KEYUP, 0);
+                        Console.WriteLine("[*] PrintScreen key executed.");
+                    }
+                    else {
                         SendKeys.SendWait(key);
                     }
-                } else if (cmd.Contains("LOCK_INPUT")) {
+                } 
+                else if (cmd.Contains("LOCK_INPUT")) {
                     isInputLocked = cmd.Contains("\"locked\":true");
                     try { BlockInput(isInputLocked); } catch {}
-                    Console.WriteLine("[*] Remote input lock set to: " + isInputLocked);
-                } else if (cmd.Contains("BLACKOUT_SCREEN")) {
+                    Console.WriteLine("[*] Remote physical input lock state: " + isInputLocked);
+                } 
+                else if (cmd.Contains("BLACKOUT_SCREEN")) {
                     isScreenBlackedOut = cmd.Contains("\"blackout\":true");
-                    Console.WriteLine("[*] Remote blackout set to: " + isScreenBlackedOut);
-                } else if (cmd.Contains("POWER_ACTION")) {
+                    Console.WriteLine("[*] Remote screen blackout state: " + isScreenBlackedOut);
+                } 
+                else if (cmd.Contains("POWER_ACTION")) {
                     string action = GetJsonString(cmd, "action");
                     if (action == "reboot") Process.Start("shutdown.exe", "/r /t 5 /c \"DameWare Remote Reboot\"");
                     else if (action == "shutdown") Process.Start("shutdown.exe", "/s /t 5 /c \"DameWare Remote Shutdown\"");
                     else if (action == "logoff") Process.Start("logoff.exe");
                 }
-            } catch {}
+            } catch (Exception ex) {
+                Console.WriteLine("[-] Command error: " + ex.Message);
+            }
         }
 
         private static double GetJsonDouble(string json, string key)
