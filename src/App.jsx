@@ -167,7 +167,6 @@ export default function App() {
           setAgentInfo(data);
           setDeployStatus(null);
           setConnectionError(null);
-          // Focus canvas automatically for keyboard typing
           setTimeout(() => { if (canvasRef.current) canvasRef.current.focus(); }, 300);
         } else if (data.type === 'SCREEN_FRAME') {
           if (data.frame) {
@@ -211,16 +210,12 @@ export default function App() {
     setFrameSvg(null);
   };
 
-  // REAL-TIME KEYBOARD EVENT HANDLER (FORWARDS ALL CANVAS TYPING TO REMOTE PC)
   const handleKeyDown = (e) => {
     if (!isConnected || isViewOnly) return;
-
-    // Do not capture if typing inside modals or input boxes
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
     let keyToSend = e.key;
 
-    // Translate Special Navigation & Editing Keys for C# SendKeys
     if (e.key === 'Enter') keyToSend = '{ENTER}';
     else if (e.key === 'Backspace') keyToSend = '{BACKSPACE}';
     else if (e.key === 'Tab') { keyToSend = '{TAB}'; e.preventDefault(); }
@@ -231,7 +226,7 @@ export default function App() {
     else if (e.key === 'ArrowLeft') keyToSend = '{LEFT}';
     else if (e.key === 'ArrowRight') keyToSend = '{RIGHT}';
     else if (e.key === 'Space' || e.key === ' ') keyToSend = ' ';
-    else if (e.key.length > 1) return; // Skip function keys / modifier-only events
+    else if (e.key.length > 1) return;
 
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({
@@ -428,7 +423,7 @@ export default function App() {
               DameWare Mini Remote Control <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-400 font-mono">v12.2 Enterprise</span>
             </h1>
             <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
-              <Shield className="w-3 h-3 text-emerald-400" /> Real-Time Canvas Keyboard Typing Active
+              <Shield className="w-3 h-3 text-emerald-400" /> Winlogon, UAC Prompt & SAS Capture Enabled
             </p>
           </div>
         </div>
@@ -474,7 +469,7 @@ export default function App() {
             {sendKeysOpen && (
               <div className="absolute left-0 top-full mt-1 flex flex-col bg-slate-900 border border-slate-800 rounded-lg shadow-xl py-1 z-50 min-w-[200px]">
                 <button onClick={() => sendSpecialKey('CAD')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
-                  <Key className="w-3.5 h-3.5 text-amber-400" /> Ctrl + Alt + Del (Security)
+                  <Key className="w-3.5 h-3.5 text-amber-400" /> Ctrl + Alt + Del (Security SAS)
                 </button>
                 <button onClick={() => sendSpecialKey('WIN_L')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
                   <Lock className="w-3.5 h-3.5 text-sky-400" /> Lock Workstation (Win+L)
@@ -722,12 +717,12 @@ export default function App() {
           </div>
 
           <div className="p-2 border-t border-slate-800 bg-slate-950/60 text-[10px] text-slate-500 flex justify-between">
-            <span>Canvas Keyboard: Active</span>
+            <span>Winlogon Capture: Enabled</span>
             <span>Port: 6129</span>
           </div>
         </aside>
 
-        {/* CENTER VIEWPORT / REMOTE DESKTOP CANVAS WITH KEYBOARD LISTENER */}
+        {/* CENTER VIEWPORT / REMOTE DESKTOP CANVAS */}
         <main className="flex-1 bg-[#050811] flex flex-col relative overflow-hidden">
           
           {/* Sub-Header Bar */}
@@ -778,7 +773,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* CANVAS DISPLAY AREA WITH KEYDOWN & FOCUS HANDLERS */}
+          {/* CANVAS DISPLAY AREA */}
           <div className="flex-1 relative flex items-center justify-center overflow-auto p-2">
             {isConnected ? (
               <div
@@ -857,189 +852,44 @@ export default function App() {
       </div>
 
       {/* MODALS */}
-      {activeModal === 'files' && (
+      {/* AGENT DOWNLOAD MODAL WITH SYSTEM SERVICE INSTALLER */}
+      {activeModal === 'agentInstall' && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-[850px] h-[550px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
+          <div className="w-[650px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
             <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
               <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
-                <Folder className="w-4 h-4 text-sky-400" /> DameWare Remote File Explorer - [{targetHost || 'MAKINE1'}]
+                <Download className="w-4 h-4 text-sky-400" /> DameWare Agent & SYSTEM Service Installer
               </span>
               <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
             </div>
-            <div className="flex-1 p-4 grid grid-cols-2 gap-4 overflow-hidden">
-              <div className="bg-slate-950/80 rounded border border-slate-800 flex flex-col">
-                <div className="p-2 border-b border-slate-800 text-xs font-semibold text-slate-400 bg-slate-900/50 flex justify-between">
-                  <span>Local Console Workstation</span><span>C:\AdminDownloads</span>
-                </div>
-                <div className="flex-1 overflow-y-auto p-2 text-xs space-y-1">
-                  <div className="p-2 hover:bg-slate-800 rounded flex justify-between text-slate-300">
-                    <span className="flex items-center gap-1.5">📄 DameWare_Agent.exe</span>
-                    <span className="font-mono text-[10px] text-slate-500">1.4 MB</span>
-                  </div>
-                </div>
+            <div className="p-5 space-y-4 text-xs">
+              <div className="p-3 bg-sky-950/60 rounded-lg border border-sky-800/50 text-sky-200 text-[11px] leading-relaxed">
+                <strong>🔒 Lock Screen (Winlogon) & UAC Capture Notice:</strong><br />
+                To capture Windows Lock screens, Ctrl+Alt+Del SAS, and UAC "Evet / Hayır" prompts, run the Agent as a <strong>Windows SYSTEM Service</strong> on the remote machine.
               </div>
-              <div className="bg-slate-950/80 rounded border border-slate-800 flex flex-col">
-                <div className="p-2 border-b border-slate-800 text-xs font-semibold text-slate-400 bg-slate-900/50 flex justify-between">
-                  <span>Remote Host [{targetHost || 'MAKINE1'}]</span><span className="text-sky-400 font-mono">{remotePath}</span>
-                </div>
-                <div className="flex-1 overflow-y-auto p-2 text-xs space-y-1">
-                  {remoteFiles.map((file, i) => (
-                    <div key={i} className="p-2 hover:bg-slate-800 rounded flex justify-between text-slate-300">
-                      <span className="flex items-center gap-1.5">{file.isDirectory ? '📁' : '📄'} {file.name}</span>
-                      <span className="font-mono text-[10px] text-slate-500">{file.isDirectory ? 'DIR' : `${(file.size/1024).toFixed(0)} KB`}</span>
-                    </div>
-                  ))}
-                </div>
+
+              <div className="flex gap-3 pt-2">
+                <a
+                  href="/DameWare_Agent.exe"
+                  download="DameWare_Agent.exe"
+                  className="flex-1 py-2.5 bg-sky-600 hover:bg-sky-500 text-white font-medium rounded text-xs flex items-center justify-center gap-2 decoration-none shadow-lg shadow-sky-600/20"
+                >
+                  <Download className="w-4 h-4" /> Download Agent (.EXE)
+                </a>
+                <a
+                  href="/Install_DameWare_Service.ps1"
+                  download="Install_DameWare_Service.ps1"
+                  className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded text-xs flex items-center justify-center gap-2 decoration-none shadow-lg shadow-emerald-600/20"
+                >
+                  <Shield className="w-4 h-4" /> Download Service Installer (.PS1)
+                </a>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {activeModal === 'chat' && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-[500px] h-[450px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
-            <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
-              <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
-                <MessageSquare className="w-4 h-4 text-emerald-400" /> DameWare Remote User Chat - [{targetHost || 'MAKINE1'}]
-              </span>
-              <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="flex-1 p-3 overflow-y-auto space-y-2 bg-slate-950/80">
-              {chatMessages.map((msg, i) => (
-                <div key={i} className={`flex flex-col text-xs ${msg.sender.includes('You') ? 'items-end' : 'items-start'}`}>
-                  <div className="flex items-center gap-1.5 text-[10px] text-slate-500 mb-0.5">
-                    <span>{msg.sender}</span> • <span>{msg.time}</span>
-                  </div>
-                  <div className={`px-3 py-2 rounded-xl max-w-[80%] ${
-                    msg.sender.includes('You') ? 'bg-sky-600 text-white rounded-br-none' : 'bg-slate-800 text-slate-200 rounded-bl-none border border-slate-700'
-                  }`}>
-                    {msg.text}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <form onSubmit={handleSendChat} className="p-3 bg-slate-900 border-t border-slate-800 flex gap-2">
-              <input
-                type="text"
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                placeholder="Uzak sunucudaki kullanıcıya mesaj yazın..."
-                className="flex-1 px-3 py-1.5 bg-slate-950 border border-slate-800 rounded outline-none text-xs text-slate-100"
-              />
-              <button type="submit" className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded font-medium flex items-center gap-1">
-                <Send className="w-3.5 h-3.5" /> Gönder
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {activeModal === 'taskmgr' && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-[650px] h-[480px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
-            <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
-              <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
-                <Cpu className="w-4 h-4 text-purple-400" /> Remote Task Manager - [{targetHost || 'MAKINE1'}]
-              </span>
-              <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="p-3 bg-slate-950/50 border-b border-slate-800 grid grid-cols-2 gap-4 text-xs">
-              <div className="p-2 bg-slate-900 rounded border border-slate-800 flex justify-between">
-                <span className="text-slate-400">CPU Usage:</span>
-                <span className="font-bold text-sky-400">4.2%</span>
-              </div>
-              <div className="p-2 bg-slate-900 rounded border border-slate-800 flex justify-between">
-                <span className="text-slate-400">Memory Usage:</span>
-                <span className="font-bold text-emerald-400">12.4 / 32.0 GB</span>
-              </div>
-            </div>
-            <div className="flex-1 overflow-y-auto p-3 text-xs">
-              <table className="w-full text-left">
-                <thead>
-                  <tr className="border-b border-slate-800 text-slate-400 font-semibold">
-                    <th className="pb-2">Process Name</th>
-                    <th className="pb-2">PID</th>
-                    <th className="pb-2">CPU %</th>
-                    <th className="pb-2">RAM Usage</th>
-                    <th className="pb-2 text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/50">
-                  {processes.map((proc, i) => (
-                    <tr key={i} className="hover:bg-slate-800/50 text-slate-200">
-                      <td className="py-2 font-medium flex items-center gap-1.5">
-                        <Activity className="w-3.5 h-3.5 text-sky-400" /> {proc.ProcessName}
-                      </td>
-                      <td className="py-2 font-mono text-slate-400">{proc.Id}</td>
-                      <td className="py-2 font-mono text-sky-400">{proc.CPU}%</td>
-                      <td className="py-2 font-mono text-emerald-400">{(proc.WorkingSet64 / 1024 / 1024).toFixed(1)} MB</td>
-                      <td className="py-2 text-right">
-                        <button
-                          onClick={() => handleKillProcess(proc.Id)}
-                          className="px-2 py-0.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 rounded text-[10px]"
-                        >
-                          End Process
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {activeModal === 'power' && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-[420px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
-            <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
-              <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
-                <Power className="w-4 h-4 text-rose-400" /> Remote Power Controls
-              </span>
-              <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="p-5 space-y-3 text-xs">
-              <p className="text-slate-400 mb-2">Select a power action to execute on remote target <strong className="text-slate-200">[{targetHost || 'MAKINE1'}]</strong>:</p>
-
-              <button
-                onClick={() => sendPowerAction('reboot')}
-                className="w-full p-3 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded-lg flex items-center gap-3 text-left group transition"
-              >
-                <RefreshCw className="w-5 h-5 text-amber-400 group-hover:rotate-180 transition duration-500" />
-                <div>
-                  <div className="font-bold text-amber-400">Reboot Remote PC (Yeniden Başlat)</div>
-                  <div className="text-[11px] text-slate-400">Restarts the remote Windows operating system cleanly</div>
-                </div>
-              </button>
-
-              <button
-                onClick={() => sendPowerAction('shutdown')}
-                className="w-full p-3 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 rounded-lg flex items-center gap-3 text-left group transition"
-              >
-                <Power className="w-5 h-5 text-rose-400" />
-                <div>
-                  <div className="font-bold text-rose-400">Shutdown Remote PC (Kapat)</div>
-                  <div className="text-[11px] text-slate-400">Powers off the remote machine instantly</div>
-                </div>
-              </button>
-
-              <button
-                onClick={() => sendPowerAction('logoff')}
-                className="w-full p-3 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 rounded-lg flex items-center gap-3 text-left group transition"
-              >
-                <User className="w-5 h-5 text-sky-400" />
-                <div>
-                  <div className="font-bold text-sky-400">Logoff User (Oturumu Kapat)</div>
-                  <div className="text-[11px] text-slate-400">Logs off the active interactive Windows session</div>
-                </div>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
+      {/* EDIT HOST SETTINGS MODAL */}
       {activeModal === 'editHostSettings' && editingHost && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[500px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
@@ -1144,6 +994,7 @@ export default function App() {
         </div>
       )}
 
+      {/* ADD HOST MODAL */}
       {activeModal === 'addHost' && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="w-[500px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
@@ -1228,31 +1079,6 @@ export default function App() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
-
-      {activeModal === 'agentInstall' && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-[650px] glass-panel rounded-xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
-            <div className="h-11 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
-              <span className="font-bold text-sm text-slate-200 flex items-center gap-2">
-                <Download className="w-4 h-4 text-sky-400" /> DameWare Agent Package & Push Installer
-              </span>
-              <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="p-5 space-y-4 text-xs">
-              <p className="text-slate-300">Download standalone agent executable:</p>
-              <div className="flex gap-3 pt-2">
-                <a
-                  href="/DameWare_Agent.exe"
-                  download="DameWare_Agent.exe"
-                  className="flex-1 py-2 bg-sky-600 hover:bg-sky-500 text-white font-medium rounded text-xs flex items-center justify-center gap-2 decoration-none"
-                >
-                  <Download className="w-4 h-4" /> Download Agent Standalone (.EXE)
-                </a>
-              </div>
-            </div>
           </div>
         </div>
       )}
