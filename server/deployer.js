@@ -19,43 +19,37 @@ export async function pushDeployAgent({ targetHost, domain = 'WORKGROUP', userna
     const publicExePath = path.join(__dirname, '..', 'public', 'DameWare_Agent.exe');
     const userAuth = domain && domain !== 'WORKGROUP' ? `${domain}\\${username}` : username;
     
-    // Remote Installation & Zero-Touch Execution via PowerShell (SMB + WMI / Scheduled Task)
+    // Remote Push Script with explicitly quoted password & SMB session cleanup
     const psScript = `
     $target = '${targetHost}'
     $user = '${userAuth.replace(/'/g, "''")}'
     $pass = '${password.replace(/'/g, "''")}'
     $exeSrc = '${publicExePath.replace(/'/g, "''")}'
 
-    # 1. Authenticate SMB session using Administrator credentials
-    net use "\\\\$target\\IPC$" "$pass" "/USER:$user" 2>&1 | Out-Null
-    net use "\\\\$target\\C$" "$pass" "/USER:$user" 2>&1 | Out-Null
+    # Clear existing SMB connections
+    net use "\\\\$target\\IPC$" /delete /y 2>&1 | Out-Null
+    net use "\\\\$target\\C$" /delete /y 2>&1 | Out-Null
 
-    # 2. Silently Copy Executable to Remote C:\\DameWare_Agent.exe
+    # Authenticate SMB session with explicit password
+    cmd.exe /c "net use \\\\$target\\IPC$ ""$pass"" /USER:$user" 2>&1 | Out-Null
+    cmd.exe /c "net use \\\\$target\\C$ ""$pass"" /USER:$user" 2>&1 | Out-Null
+
+    # Silently Copy Executable to Remote C:\\DameWare_Agent.exe
     $remotePath = "\\\\$target\\C$\\DameWare_Agent.exe"
     Copy-Item -Path $exeSrc -Destination $remotePath -Force -ErrorAction SilentlyContinue
 
-    # 3. Create Firewall Inbound Rule for Port 6129 remotely
-    try {
-        $secpass = ConvertTo-SecureString $pass -AsPlainText -Force
-        $cred = New-Object System.Management.Automation.PSCredential ($user, $secpass)
-        Invoke-Command -ComputerName $target -Credential $cred -ScriptBlock {
-            New-NetFirewallRule -DisplayName "DameWare Remote Port" -Direction Inbound -LocalPort 6129 -Protocol TCP -Action Allow -ErrorAction SilentlyContinue
-            Start-Process -FilePath "C:\\DameWare_Agent.exe" -WindowStyle Hidden
-        } -ErrorAction SilentlyContinue
-    } catch {}
-
-    # 4. Fallback WMI Process Creation
+    # Launch Remote Process via WMI
     try {
         $wmi = [WMICLASS]"\\\\$target\\root\\cimv2:Win32_Process"
         $wmi.Create("C:\\DameWare_Agent.exe") | Out-Null
     } catch {}
 
-    # 5. Fallback Remote Scheduled Task (Runs immediately without user interaction)
-    schtasks /create /s $target /u $user /p $pass /tn "DameWareAutoLaunch" /tr "C:\\DameWare_Agent.exe" /sc once /st 00:00 /f 2>&1 | Out-Null
-    schtasks /run /s $target /u $user /p $pass /tn "DameWareAutoLaunch" 2>&1 | Out-Null
+    # Launch Remote Process via Schtasks
+    schtasks /create /s $target /u $user /p "$pass" /tn "DameWareAutoLaunch" /tr "C:\\DameWare_Agent.exe" /sc once /st 00:00 /f 2>&1 | Out-Null
+    schtasks /run /s $target /u $user /p "$pass" /tn "DameWareAutoLaunch" 2>&1 | Out-Null
     `;
 
-    addLog(`Phase 2/3: Silently copying DameWare_Agent.exe to \\\\${targetHost}\\C$\\...`);
+    addLog(`Phase 2/3: Copying DameWare_Agent.exe to \\\\${targetHost}\\C$\\...`);
 
     exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${psScript.replace(/"/g, '\\"')}"`, (err, stdout, stderr) => {
       addLog(`Phase 3/3: Remote execution signal sent to ${targetHost}! Waiting for connection...`);
