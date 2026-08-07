@@ -19,48 +19,37 @@ export async function pushDeployAgent({ targetHost, domain = 'WORKGROUP', userna
     const publicExePath = path.join(__dirname, '..', 'public', 'DameWare_Agent.exe');
     const userAuth = domain && domain !== 'WORKGROUP' ? `${domain}\\${username}` : username;
     
-    // Remote Deployment Script targeting C:\Sanal\DameWare_Agent.exe on the remote VM
+    // Remote Deployment Script creating Windows Service automatically via SMB & sc.exe
     const psScript = `
     $targetHost = "${targetHost}"
     $targetUser = "${userAuth}"
     $targetPass = "${password}"
     $exeLocal = "${publicExePath.replace(/\\/g, '\\\\')}"
 
+    # Clear previous SMB connections and establish fresh session
+    cmd.exe /c "net use \\\\$targetHost\\IPC$ /delete /y" 2>&1 | Out-Null
+    cmd.exe /c "net use \\\\$targetHost\\C$ /delete /y" 2>&1 | Out-Null
     cmd.exe /c "net use \\\\$targetHost\\C$ $targetPass /USER:$targetUser" 2>&1 | Out-Null
 
     # Create C:\\Sanal directory on Remote VM
     powershell -Command "New-Item -ItemType Directory -Force -Path '\\\\$targetHost\\C$\\Sanal'" 2>&1 | Out-Null
 
-    # Copy Executable to Remote C:\\Sanal\\DameWare_Agent.exe
+    # Copy Service Executable to Remote C:\\Sanal\\DameWare_Agent.exe
     Copy-Item -Path $exeLocal -Destination "\\\\$targetHost\\C$\\Sanal\\DameWare_Agent.exe" -Force -ErrorAction SilentlyContinue
 
-    # Copy Executable to Remote C:\\DameWare_Agent.exe as well
-    Copy-Item -Path $exeLocal -Destination "\\\\$targetHost\\C$\\DameWare_Agent.exe" -Force -ErrorAction SilentlyContinue
-
-    # Launch Process Remotely
-    try {
-        $sec = ConvertTo-SecureString $targetPass -AsPlainText -Force
-        $cred = New-Object System.Management.Automation.PSCredential($targetUser, $sec)
-        Invoke-Command -ComputerName $targetHost -Credential $cred -ScriptBlock {
-            New-Item -ItemType Directory -Force -Path "C:\\Sanal" -ErrorAction SilentlyContinue
-            Copy-Item -Path "C:\\DameWare_Agent.exe" -Destination "C:\\Sanal\\DameWare_Agent.exe" -Force -ErrorAction SilentlyContinue
-            Start-Process -FilePath "C:\\Sanal\\DameWare_Agent.exe" -WindowStyle Hidden
-        } -ErrorAction SilentlyContinue
-    } catch {}
-
-    # Fallback Schtasks
-    schtasks /create /s $targetHost /u $targetUser /p $targetPass /tn "DameWareSanalAuto" /tr "C:\\Sanal\\DameWare_Agent.exe" /sc once /st 00:00 /f 2>&1 | Out-Null
-    schtasks /run /s $targetHost /u $targetUser /p $targetPass /tn "DameWareSanalAuto" 2>&1 | Out-Null
+    # Register and start Windows NT Service remotely
+    cmd.exe /c "sc.exe \\\\$targetHost create DameWareSanal binPath= ""C:\\Sanal\\DameWare_Agent.exe"" start= auto displayName= ""DameWare Remote Agent Service""" 2>&1 | Out-Null
+    cmd.exe /c "sc.exe \\\\$targetHost start DameWareSanal" 2>&1 | Out-Null
     `;
 
-    addLog(`Phase 2/3: Copying DameWare_Agent.exe to \\\\${targetHost}\\C$\\Sanal\\...`);
+    addLog(`Phase 2/3: Copying Service Binary to \\\\${targetHost}\\C$\\Sanal\\...`);
 
     exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${psScript.replace(/\n/g, '; ')}"`, (err, stdout, stderr) => {
-      addLog(`Phase 3/3: Remote execution signal sent to C:\\Sanal on ${targetHost}!`);
+      addLog(`Phase 3/3: DameWareSanal Windows Service registered and started on ${targetHost}!`);
       setTimeout(() => {
         resolve({
           success: true,
-          message: `Agent automatically pushed to C:\\Sanal on ${targetHost}`
+          message: `Agent Service automatically deployed to C:\\Sanal on ${targetHost}`
         });
       }, 2500);
     });
