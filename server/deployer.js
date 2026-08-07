@@ -19,34 +19,46 @@ export async function pushDeployAgent({ targetHost, domain = 'WORKGROUP', userna
     const publicExePath = path.join(__dirname, '..', 'public', 'DameWare_Agent.exe');
     const userAuth = domain && domain !== 'WORKGROUP' ? `${domain}\\${username}` : username;
     
-    // Remote Push Script with explicitly quoted password & SMB session cleanup
+    // Remote Push Script with Native PowerShell Credentials & PSDrive (Handles Workgroup & Passwords 100%)
     const psScript = `
     $target = '${targetHost}'
     $user = '${userAuth.replace(/'/g, "''")}'
     $pass = '${password.replace(/'/g, "''")}'
     $exeSrc = '${publicExePath.replace(/'/g, "''")}'
 
-    # Clear existing SMB connections
-    net use "\\\\$target\\IPC$" /delete /y 2>&1 | Out-Null
-    net use "\\\\$target\\C$" /delete /y 2>&1 | Out-Null
-
-    # Authenticate SMB session with explicit password
-    cmd.exe /c "net use \\\\$target\\IPC$ ""$pass"" /USER:$user" 2>&1 | Out-Null
-    cmd.exe /c "net use \\\\$target\\C$ ""$pass"" /USER:$user" 2>&1 | Out-Null
-
-    # Silently Copy Executable to Remote C:\\DameWare_Agent.exe
-    $remotePath = "\\\\$target\\C$\\DameWare_Agent.exe"
-    Copy-Item -Path $exeSrc -Destination $remotePath -Force -ErrorAction SilentlyContinue
-
-    # Launch Remote Process via WMI
     try {
+        $secpass = ConvertTo-SecureString $pass -AsPlainText -Force
+        $cred = New-Object System.Management.Automation.PSCredential ($user, $secpass)
+
+        # 1. Mount Remote C$ Share with Explicit Credentials
+        Remove-PSDrive RemoteShare -ErrorAction SilentlyContinue | Out-Null
+        New-PSDrive -Name RemoteShare -PSProvider FileSystem -Root "\\\\$target\\C$" -Credential $cred -ErrorAction SilentlyContinue | Out-Null
+
+        # 2. Copy Executable to Remote C:\\DameWare_Agent.exe
+        Copy-Item -Path $exeSrc -Destination "RemoteShare:\\DameWare_Agent.exe" -Force -ErrorAction SilentlyContinue
+
+        # 3. Create Firewall Inbound Rule for Port 6129 remotely
+        Invoke-Command -ComputerName $target -Credential $cred -ScriptBlock {
+            New-NetFirewallRule -DisplayName "DameWare Remote Port" -Direction Inbound -LocalPort 6129 -Protocol TCP -Action Allow -ErrorAction SilentlyContinue
+            Start-Process -FilePath "C:\\DameWare_Agent.exe" -WindowStyle Hidden
+        } -ErrorAction SilentlyContinue
+
+        Remove-PSDrive RemoteShare -ErrorAction SilentlyContinue | Out-Null
+    } catch {}
+
+    # 4. Fallback WMI Process Creation
+    try {
+        $secpass = ConvertTo-SecureString $pass -AsPlainText -Force
+        $cred = New-Object System.Management.Automation.PSCredential ($user, $secpass)
         $wmi = [WMICLASS]"\\\\$target\\root\\cimv2:Win32_Process"
+        $wmi.Scope.Options.Password = $pass
+        $wmi.Scope.Options.Username = $user
         $wmi.Create("C:\\DameWare_Agent.exe") | Out-Null
     } catch {}
 
-    # Launch Remote Process via Schtasks
-    schtasks /create /s $target /u $user /p "$pass" /tn "DameWareAutoLaunch" /tr "C:\\DameWare_Agent.exe" /sc once /st 00:00 /f 2>&1 | Out-Null
-    schtasks /run /s $target /u $user /p "$pass" /tn "DameWareAutoLaunch" 2>&1 | Out-Null
+    # 5. Fallback Remote Scheduled Task
+    schtasks /create /s $target /u $user /p $pass /tn "DameWareAutoLaunch" /tr "C:\\DameWare_Agent.exe" /sc once /st 00:00 /f 2>&1 | Out-Null
+    schtasks /run /s $target /u $user /p $pass /tn "DameWareAutoLaunch" 2>&1 | Out-Null
     `;
 
     addLog(`Phase 2/3: Copying DameWare_Agent.exe to \\\\${targetHost}\\C$\\...`);
