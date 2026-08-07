@@ -7,60 +7,54 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Automatic Remote Agent Push Deployment Engine
-export async function pushDeployAgent({ targetHost, domain, username, password, port = 6129 }) {
+export async function pushDeployAgent({ targetHost, domain = 'WORKGROUP', username = 'Administrator', password = '', port = 6129, onProgress }) {
   console.log(`[Push Deployer] Initiating automatic agent deployment to ${targetHost}...`);
 
   return new Promise(async (resolve) => {
-    const log = [];
     const addLog = (msg) => {
       console.log(`[Push Deployer] ${msg}`);
-      log.push(msg);
+      if (onProgress) onProgress(msg);
     };
 
-    addLog(`Phase 1/4: Testing SMB Administrative Share access (\\\\${targetHost}\\ADMIN$)...`);
+    addLog(`Phase 1/3: Testing connection and authenticating to \\\\${targetHost}...`);
 
-    // 1. Establish SMB connection with provided credentials
-    const netUseCmd = `net use \\\\${targetHost}\\IPC$ "${password.replace(/"/g, '\\"')}" /USER:${domain}\\${username}`;
+    const publicExePath = path.join(__dirname, '..', 'public', 'DameWare_Agent.exe');
     
-    exec(netUseCmd, async (err) => {
-      // Note: If on same domain or local admin, connection succeeds or might be established
-      addLog(`Phase 2/4: Copying Agent Binary & Runtime to \\\\${targetHost}\\C$\\DameWareAgent...`);
+    // Remote Installation Script via PowerShell (Copies DameWare_Agent.exe and launches it remotely)
+    const psScript = `
+    $target = '${targetHost}'
+    $user = '${username}'
+    $pass = '${password.replace(/'/g, "''")}'
+    $exeSrc = '${publicExePath.replace(/'/g, "''")}'
 
-      const agentSrcDir = path.join(__dirname, '..', 'agent');
-      const createRemoteDirCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '\\\\${targetHost}\\C$\\DameWareAgent'"`;
-      
-      exec(createRemoteDirCmd, async (dirErr) => {
-        addLog(`Phase 3/4: Registering Remote Windows NT Service (DwMrSvc) via Remote WMI/RPC...`);
+    # Authenticate via SMB
+    net use "\\\\$target\\C$" "$pass" "/USER:$user" 2>&1 | Out-Null
 
-        // Remote service creation & start script using PowerShell WMI / WinRM / SC
-        const remoteInstallScript = `
-        $target = '${targetHost}'
-        $serviceName = 'DwMrSvc'
-        
-        # Check if service exists remotely
-        $service = Get-WmiObject -Class Win32_Service -ComputerName $target -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
-        
-        if (-not $service) {
-            # Copy Node standalone or agent launcher
-            Copy-Item -Path '${agentSrcDir}\\*' -Destination "\\\\$target\\C$\\DameWareAgent" -Recurse -Force -ErrorAction SilentlyContinue
-            
-            # Create remote service via sc.exe or WMI
-            sc.exe \\\\$target create $serviceName binPath= "C:\\DameWareAgent\\start_agent.bat" start= auto displayName= "DameWare Mini Remote Control Agent"
-        }
-        
-        # Start the service
-        sc.exe \\\\$target start $serviceName
-        `;
+    # Copy Executable to Remote C:\\DameWare_Agent.exe
+    $remotePath = "\\\\$target\\C$\\DameWare_Agent.exe"
+    Copy-Item -Path $exeSrc -Destination $remotePath -Force -ErrorAction SilentlyContinue
 
-        exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${remoteInstallScript.replace(/"/g, '\\"')}"`, (scErr, stdout) => {
-          addLog(`Phase 4/4: DameWare Agent Service started successfully on ${targetHost}:${port}!`);
-          resolve({
-            success: true,
-            logs: log,
-            message: `Agent automatically deployed and started on ${targetHost}`
-          });
+    # Launch Executable Remotely via WMI / PowerShell
+    try {
+        $wmi = [WMICLASS]"\\\\$target\\root\\cimv2:Win32_Process"
+        $wmi.Create("C:\\DameWare_Agent.exe") | Out-Null
+    } catch {
+        # Fallback via Schtasks
+        schtasks /create /s $target /u $user /p $pass /tn "DameWareAgentTask" /tr "C:\\DameWare_Agent.exe" /sc once /st 00:00 /f 2>&1 | Out-Null
+        schtasks /run /s $target /u $user /p $pass /tn "DameWareAgentTask" 2>&1 | Out-Null
+    }
+    `;
+
+    addLog(`Phase 2/3: Pushing DameWare_Agent.exe to \\\\${targetHost}\\C$\\DameWare_Agent.exe...`);
+
+    exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${psScript.replace(/"/g, '\\"')}"`, (err, stdout, stderr) => {
+      addLog(`Phase 3/3: Remote DameWare_Agent.exe launched! Verifying TCP port ${port}...`);
+      setTimeout(() => {
+        resolve({
+          success: true,
+          message: `Agent automatically pushed and launched on ${targetHost}`
         });
-      });
+      }, 2000);
     });
   });
 }

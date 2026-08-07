@@ -31,63 +31,97 @@ wss.on('connection', (ws, req) => {
   const params = new URLSearchParams(req.url.replace('/?', ''));
   const targetHost = params.get('host') || '127.0.0.1';
   const targetPort = parseInt(params.get('port') || '6129', 10);
+  const domain = params.get('domain') || 'WORKGROUP';
+  const username = params.get('username') || 'Administrator';
+  const password = params.get('password') || '';
 
-  console.log(`[Gateway] Single Active Session: Connecting to ${targetHost}:${targetPort}...`);
+  console.log(`[Gateway] Initiating session to ${targetHost}:${targetPort}...`);
 
   let isConnected = false;
   let isCancelled = false;
+  let hasAttemptedPush = false;
   let tcpClient = new net.Socket();
   let buffer = '';
 
-  tcpClient.setTimeout(4000);
-
-  tcpClient.connect(targetPort, targetHost, () => {
-    if (isCancelled) {
-      tcpClient.destroy();
-      return;
-    }
-    isConnected = true;
-    console.log(`[Gateway] Active TCP session established with ${targetHost}:${targetPort}`);
-  });
-
-  tcpClient.on('data', (chunk) => {
+  const tryConnect = () => {
     if (isCancelled) return;
-    buffer += chunk.toString('utf8');
-    let lines = buffer.split('\n');
-    buffer = lines.pop();
 
-    for (let line of lines) {
-      if (line.trim() && ws.readyState === WebSocket.OPEN && !isCancelled) {
-        ws.send(line.trim());
+    tcpClient = new net.Socket();
+    tcpClient.setTimeout(3500);
+
+    tcpClient.connect(targetPort, targetHost, () => {
+      if (isCancelled) {
+        tcpClient.destroy();
+        return;
+      }
+      isConnected = true;
+      console.log(`[Gateway] Connected directly to Agent on ${targetHost}:${targetPort}`);
+    });
+
+    tcpClient.on('data', (chunk) => {
+      if (isCancelled) return;
+      buffer += chunk.toString('utf8');
+      let lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (let line of lines) {
+        if (line.trim() && ws.readyState === WebSocket.OPEN && !isCancelled) {
+          ws.send(line.trim());
+        }
+      }
+    });
+
+    tcpClient.on('timeout', handleConnectionFailure);
+    tcpClient.on('error', handleConnectionFailure);
+
+    tcpClient.on('close', () => {
+      if (isConnected && ws.readyState === WebSocket.OPEN && !isCancelled) {
+        ws.close();
+      }
+    });
+  };
+
+  const handleConnectionFailure = async (err) => {
+    if (isConnected || isCancelled) return;
+    tcpClient.destroy();
+
+    // AUTOMATIC AGENT PUSH DEPLOYMENT IF PORT IS CLOSED & NOT YET ATTEMPTED
+    if (!hasAttemptedPush) {
+      hasAttemptedPush = true;
+      console.log(`[Gateway] Agent port ${targetPort} unreachable on ${targetHost}. Launching Automatic Remote Push Deployment...`);
+
+      sendProgressToConsole(ws, `Agent port ${targetPort} closed. Automatically pushing and launching DameWare_Agent.exe on ${targetHost}...`);
+
+      try {
+        await pushDeployAgent({
+          targetHost,
+          domain,
+          username,
+          password,
+          port: targetPort,
+          onProgress: (msg) => sendProgressToConsole(ws, msg)
+        });
+
+        console.log(`[Gateway] Push Deployment completed. Retrying direct TCP connection to ${targetHost}:${targetPort}...`);
+        sendProgressToConsole(ws, `Agent launched! Connecting to remote screen...`);
+
+        setTimeout(() => {
+          if (!isCancelled) tryConnect();
+        }, 1500);
+        return;
+      } catch (deployErr) {
+        console.log(`[Gateway] Push Deployment notice: ${deployErr.message}`);
       }
     }
-  });
 
-  tcpClient.on('timeout', () => {
-    if (!isConnected && !isCancelled) {
-      console.log(`[Gateway] Connection timeout for ${targetHost}:${targetPort}`);
-      sendErrorToConsole(ws, 'ERR_CONNECTION_TIMED_OUT', `Connecting to ${targetHost}:${targetPort} timed out. Verify target IP and Firewall Port 6129.`);
-      tcpClient.destroy();
-    }
-  });
+    // If already attempted push or push failed, return crisp error
+    let code = 'ERR_CONNECTION_FAILED';
+    if (err && err.code === 'ECONNREFUSED') code = 'ERR_CONNECTION_REFUSED';
+    if (err && err.code === 'ENOTFOUND') code = 'ERR_HOST_NOT_FOUND';
+    if (err && err.code === 'ETIMEDOUT') code = 'ERR_CONNECTION_TIMED_OUT';
 
-  tcpClient.on('error', (err) => {
-    if (!isConnected && !isCancelled) {
-      console.log(`[Gateway] Connection error for ${targetHost}:${targetPort}: ${err.message}`);
-      let code = 'ERR_CONNECTION_FAILED';
-      if (err.code === 'ECONNREFUSED') code = 'ERR_CONNECTION_REFUSED';
-      if (err.code === 'ENOTFOUND') code = 'ERR_HOST_NOT_FOUND';
-      if (err.code === 'ETIMEDOUT') code = 'ERR_CONNECTION_TIMED_OUT';
-
-      sendErrorToConsole(ws, code, `Unable to connect to ${targetHost}:${targetPort} (${err.message}). Make sure DameWare_Agent.exe is running on the target machine.`);
-    }
-  });
-
-  tcpClient.on('close', () => {
-    if (isConnected && ws.readyState === WebSocket.OPEN && !isCancelled) {
-      ws.close();
-    }
-  });
+    sendErrorToConsole(ws, code, `Unable to connect to ${targetHost}:${targetPort}. Verify target IP and Firewall port 6129.`);
+  };
 
   ws.on('message', (message) => {
     if (isConnected && tcpClient.writable && !isCancelled) {
@@ -95,11 +129,24 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  ws.on('close', () => {
+  ws.onclose = () => {
     isCancelled = true;
     tcpClient.destroy();
-  });
+  };
+
+  // Start initial probe
+  tryConnect();
 });
+
+function sendProgressToConsole(ws, message) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'DEPLOYMENT_PROGRESS',
+      message,
+      timestamp: Date.now()
+    }));
+  }
+}
 
 function sendErrorToConsole(ws, errorCode, errorMessage) {
   if (ws.readyState === WebSocket.OPEN) {
