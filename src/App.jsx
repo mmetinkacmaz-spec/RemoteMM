@@ -3,7 +3,7 @@ import {
   Monitor, Shield, Terminal, Folder, MessageSquare, Cpu, Power,
   Lock, Eye, Camera, Disc, RefreshCw, Server, Wifi, Play, Search,
   Settings, ChevronRight, ChevronDown, Key, Download, Upload, Trash2,
-  X, Check, AlertTriangle, Send, Activity, User, HardDrive, Plus, Zap, Edit3, AlertCircle, Unlock, EyeOff
+  X, Check, AlertTriangle, Send, Activity, User, HardDrive, Plus, Zap, Edit3, AlertCircle, Unlock, EyeOff, Copy
 } from 'lucide-react';
 
 const LOCAL_STORAGE_KEY = 'dameware_saved_hosts_v1';
@@ -39,6 +39,7 @@ export default function App() {
 
   // Active Modals
   const [activeModal, setActiveModal] = useState(null);
+  const [setupCommand, setSetupCommand] = useState('');
 
   // Mouse Holding / Dragging state
   const isMousePressedRef = useRef(false);
@@ -56,17 +57,30 @@ export default function App() {
       {
         domain: 'KAYITLI SUNUCULARIM (My Saved Hosts)',
         hosts: [
-          { id: 'host-1', name: 'MAKINE1 (Sanal Sunucu)', ip: 'MAKINE1', port: '6129', domain: 'WORKGROUP', user: 'Makine', pass: '', status: 'ONLINE', os: 'Windows 11 Pro' }
+          { id: 'host-1', name: 'makine1 (172.26.10.109)', ip: '172.26.10.109', port: '6129', domain: 'WORKGROUP', user: 'makina1', pass: '', status: 'ONLINE', os: 'Windows 10 Pro' }
         ]
       }
     ];
   });
+
 
   useEffect(() => {
     try {
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(savedHosts));
     } catch (e) {}
   }, [savedHosts]);
+
+  useEffect(() => {
+    // Fetch the dynamic setup command from the backend on load
+    fetch('http://localhost:3001/api/setup-command')
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.cmd) {
+          setSetupCommand(data.cmd);
+        }
+      })
+      .catch(err => console.error('Failed to fetch setup command:', err));
+  }, []);
 
   // Form States
   const [editingHost, setEditingHost] = useState(null);
@@ -99,9 +113,19 @@ export default function App() {
   ]);
 
   const socketRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const reconnectCountRef = useRef(0);
+  const lastHostRef = useRef(null);
+
+  const isCancelledRef = useRef(false);
 
   // SINGLE ACTIVE CONNECTION ENFORCER
   const handleConnect = (hostObj = null) => {
+    isCancelledRef.current = false;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     if (socketRef.current) {
       socketRef.current.onclose = null;
       socketRef.current.onerror = null;
@@ -131,6 +155,10 @@ export default function App() {
     }
 
     if (!target.trim()) return;
+
+    // Reconnect tracking
+    reconnectCountRef.current = 0;
+    lastHostRef.current = hostObj || { ip: target, port: p, domain: d, user: u, pass };
 
     setIsConnected(false);
     setIsConnecting(true);
@@ -165,6 +193,10 @@ export default function App() {
           setConnectionError(null);
           setTimeout(() => { if (canvasRef.current) canvasRef.current.focus(); }, 300);
         } else if (data.type === 'SCREEN_FRAME') {
+          setIsConnecting(false);
+          setIsConnected(true);
+          setDeployStatus(null);
+          setConnectionError(null);
           if (data.frame) {
             setFrameSrc(`data:image/jpeg;base64,${data.frame}`);
             setFrameSvg(null);
@@ -180,6 +212,13 @@ export default function App() {
     ws.onclose = () => {
       setIsConnected(false);
       setIsConnecting(false);
+      // Otomatik yeniden bağlanma — 5 deneme, 4 saniye aralık
+      if (reconnectCountRef.current < 5 && lastHostRef.current && !isCancelledRef.current) {
+        reconnectCountRef.current++;
+        reconnectTimerRef.current = setTimeout(() => {
+          handleConnect(lastHostRef.current);
+        }, 4000);
+      }
     };
 
     ws.onerror = () => {
@@ -192,6 +231,13 @@ export default function App() {
   };
 
   const handleDisconnect = () => {
+    isCancelledRef.current = true;
+    reconnectCountRef.current = 0;
+    lastHostRef.current = null;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     if (socketRef.current) {
       socketRef.current.onclose = null;
       socketRef.current.onerror = null;
@@ -307,20 +353,70 @@ export default function App() {
     }
   };
 
-  const sendMouseInput = (action, e) => {
+  const sendMouseInput = (action, e, extra = {}) => {
     if (!isConnected || isViewOnly) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const xPercent = (e.clientX - rect.left) / rect.width;
-    const yPercent = (e.clientY - rect.top) / rect.height;
+    
+    const container = e.currentTarget || e.target?.closest('[data-remote-canvas]');
+    if (!container) return;
+    const imgEl = container.querySelector('img');
+
+    const containerRect = container.getBoundingClientRect();
+    let xPercent, yPercent;
+
+    // Gerçek uzak ekran boyutlarını HANDSHAKE_ACK'tan al
+    const remoteW = agentInfo?.screenWidth || 1920;
+    const remoteH = agentInfo?.screenHeight || 1080;
+    const naturalAspect = remoteW / remoteH;
+
+    if (scaleMode === 'fit') {
+      const containerWidth  = containerRect.width;
+      const containerHeight = containerRect.height;
+      const containerAspect = containerWidth / containerHeight;
+
+      let renderedWidth, renderedHeight, leftOffset, topOffset;
+      if (containerAspect > naturalAspect) {
+        renderedHeight = containerHeight;
+        renderedWidth  = containerHeight * naturalAspect;
+        leftOffset = containerRect.left + (containerWidth - renderedWidth) / 2;
+        topOffset  = containerRect.top;
+      } else {
+        renderedWidth  = containerWidth;
+        renderedHeight = containerWidth / naturalAspect;
+        leftOffset = containerRect.left;
+        topOffset  = containerRect.top + (containerHeight - renderedHeight) / 2;
+      }
+      xPercent = (e.clientX - leftOffset) / renderedWidth;
+      yPercent = (e.clientY - topOffset)  / renderedHeight;
+    } else if (scaleMode === '100%') {
+      const imgRect = imgEl ? imgEl.getBoundingClientRect() : containerRect;
+      xPercent = (e.clientX - imgRect.left) / imgRect.width;
+      yPercent = (e.clientY - imgRect.top)  / imgRect.height;
+    } else {
+      // stretch
+      xPercent = (e.clientX - containerRect.left) / containerRect.width;
+      yPercent = (e.clientY - containerRect.top)  / containerRect.height;
+    }
+
+    xPercent = Math.max(0, Math.min(1, xPercent));
+    yPercent = Math.max(0, Math.min(1, yPercent));
 
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({
         type: 'MOUSE_INPUT',
-        action: action,
-        button: e.button === 2 ? 'right' : 'left',
+        action,
+        button: e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left',
         xPercent,
-        yPercent
+        yPercent,
+        ...extra
       }));
+    }
+  };
+
+  const sendScrollInput = (e) => {
+    if (!isConnected || isViewOnly) return;
+    const delta = e.deltaY > 0 ? -1 : 1;
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'MOUSE_INPUT', action: 'scroll', delta }));
     }
   };
 
@@ -336,9 +432,7 @@ export default function App() {
   };
 
   const handleMouseMove = (e) => {
-    if (isMousePressedRef.current) {
-      sendMouseInput('move', e);
-    }
+    sendMouseInput('move', e);
   };
 
   const handleOpenEditHost = (host) => {
@@ -472,28 +566,56 @@ export default function App() {
               <Key className="w-3.5 h-3.5 text-amber-400" /> Send Keys <ChevronDown className="w-3 h-3 text-slate-400" />
             </button>
             {sendKeysOpen && (
-              <div className="absolute left-0 top-full mt-1 flex flex-col bg-slate-900 border border-slate-800 rounded-lg shadow-xl py-1 z-50 min-w-[220px]">
+              <div className="absolute left-0 top-full mt-1 flex flex-col bg-slate-900 border border-slate-800 rounded-lg shadow-xl py-1 z-50 min-w-[240px]">
+                {/* UAC */}
+                <div className="px-3 py-1 text-[10px] text-slate-500 uppercase tracking-wider font-semibold">UAC Onay</div>
                 <button onClick={() => sendSpecialKey('UAC_YES')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-emerald-400 font-bold flex items-center gap-2">
-                  <Check className="w-4 h-4 text-emerald-400" /> Approve UAC (Evet / Onayla)
+                  <Check className="w-4 h-4 text-emerald-400" /> Approve UAC — Evet / Yes (Enter)
                 </button>
                 <button onClick={() => sendSpecialKey('UAC_NO')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-rose-400 font-bold flex items-center gap-2">
-                  <X className="w-4 h-4 text-rose-400" /> Decline UAC (Hayır / İptal)
+                  <X className="w-4 h-4 text-rose-400" /> Decline UAC — Hayır / No (Esc)
                 </button>
                 <div className="h-px bg-slate-800 my-1"></div>
+                {/* Sistem Tuşları */}
+                <div className="px-3 py-1 text-[10px] text-slate-500 uppercase tracking-wider font-semibold">Sistem Tuşları</div>
+                <button onClick={() => sendSpecialKey('TASK_MGR')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
+                  <Cpu className="w-3.5 h-3.5 text-purple-400" /> Görev Yöneticisi (Ctrl+Shift+Esc)
+                </button>
+                <button onClick={() => sendSpecialKey('WIN_KEY')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
+                  <Monitor className="w-3.5 h-3.5 text-sky-400" /> Başlat Menüsü (Win)
+                </button>
                 <button onClick={() => sendSpecialKey('CAD')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
-                  <Key className="w-3.5 h-3.5 text-amber-400" /> Ctrl + Alt + Del (Security SAS)
+                  <Key className="w-3.5 h-3.5 text-amber-400" /> Ctrl + Alt + Del
                 </button>
                 <button onClick={() => sendSpecialKey('WIN_L')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
-                  <Lock className="w-3.5 h-3.5 text-sky-400" /> Lock Workstation (Win+L)
+                  <Lock className="w-3.5 h-3.5 text-sky-400" /> Ekranı Kilitle (Win+L)
+                </button>
+                <button onClick={() => sendSpecialKey('ESC')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
+                  <X className="w-3.5 h-3.5 text-slate-400" /> Escape Tuşu
+                </button>
+                <button onClick={() => sendSpecialKey('ALT_F4')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
+                  <X className="w-3.5 h-3.5 text-rose-400" /> Pencereyi Kapat (Alt+F4)
                 </button>
                 <button onClick={() => sendSpecialKey('WIN_TAB')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
                   <Monitor className="w-3.5 h-3.5 text-purple-400" /> Task Switcher (Win+Tab)
                 </button>
                 <button onClick={() => sendSpecialKey('ALT_TAB')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
-                  <Monitor className="w-3.5 h-3.5 text-slate-400" /> Alt + Tab Switcher
+                  <Monitor className="w-3.5 h-3.5 text-slate-400" /> Alt + Tab
                 </button>
                 <button onClick={() => sendSpecialKey('PRTSCN')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-slate-200 flex items-center gap-2">
                   <Camera className="w-3.5 h-3.5 text-emerald-400" /> Print Screen
+                </button>
+                <div className="h-px bg-slate-800 my-1"></div>
+                {/* Güç / Oturum */}
+                <div className="px-3 py-1 text-[10px] text-slate-500 uppercase tracking-wider font-semibold">Oturum &amp; Güç</div>
+                <button onClick={() => sendPowerAction('logoff')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-amber-400 flex items-center gap-2">
+                  <Power className="w-3.5 h-3.5 text-amber-400" /> Oturumu Kapat (Logoff)
+                </button>
+                <button onClick={() => sendPowerAction('reboot')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-orange-400 flex items-center gap-2">
+                  <RefreshCw className="w-3.5 h-3.5 text-orange-400" /> Yeniden Başlat (Reboot)
+                </button>
+                <button onClick={() => sendPowerAction('shutdown')} className="px-3 py-2 text-xs text-left hover:bg-slate-800 text-rose-400 flex items-center gap-2">
+                  <Power className="w-3.5 h-3.5 text-rose-400" /> Kapat (Shutdown)
                 </button>
               </div>
             )}
@@ -687,7 +809,7 @@ export default function App() {
                     <div className="pl-2 space-y-1 border-l border-slate-800">
                       {group.hosts.map((h, i) => (
                         <div
-                          key={`host-${h.id || i}`}
+                          key={`host-item-${h.id || h.ip || 'index'}-${i}`}
                           className="group flex items-center justify-between p-2 rounded hover:bg-slate-800/80 transition border border-transparent hover:border-slate-700/50"
                         >
                           <div className="flex items-center gap-2 cursor-pointer flex-1" onClick={() => handleConnect(h)}>
@@ -791,10 +913,12 @@ export default function App() {
               <div
                 ref={canvasRef}
                 tabIndex={0}
+                data-remote-canvas="true"
                 className="relative w-full h-full border border-slate-800/80 rounded-lg shadow-2xl overflow-hidden cursor-crosshair outline-none focus:border-sky-500 flex items-center justify-center bg-black"
                 onMouseDown={handleMouseDown}
                 onMouseUp={handleMouseUp}
                 onMouseMove={handleMouseMove}
+                onWheel={(e) => { e.preventDefault(); sendScrollInput(e); }}
                 onKeyDown={handleKeyDown}
                 onContextMenu={(e) => { e.preventDefault(); sendMouseInput('click', e); }}
               >
@@ -883,14 +1007,34 @@ export default function App() {
               <button onClick={() => setActiveModal(null)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
             </div>
             <div className="p-5 space-y-4 text-xs">
-              <p className="text-slate-300">Download standalone agent executable:</p>
-              <div className="flex gap-3 pt-2">
+              <p className="text-slate-300">Bu bilgisayar veya sunucu bir Domain'e (Active Directory) bağlı değilse (Workgroup ağındaysa), Otomatik Kurulum başarısız olabilir. Yeni makineyi RemoteMM'e bağlamak için aşağıdaki tek satırlık kodu hedef makinede <strong>PowerShell (Yönetici)</strong> üzerinden çalıştırın:</p>
+              
+              <div className="relative group">
+                <div className="absolute -inset-1 bg-gradient-to-r from-sky-500/20 to-emerald-500/20 rounded-lg blur opacity-50 group-hover:opacity-100 transition duration-1000"></div>
+                <div className="relative bg-slate-950 border border-slate-800 rounded-lg p-4">
+                  <pre className="font-mono text-[10px] text-sky-300 whitespace-pre-wrap break-all select-all selection:bg-sky-900 overflow-y-auto max-h-40 scrollbar-thin">
+                    {setupCommand || "Yükleniyor..."}
+                  </pre>
+                </div>
+              </div>
+
+              <div className="flex gap-3 pt-4 border-t border-slate-800/50 mt-4">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(setupCommand);
+                    alert('Kurulum kodu kopyalandı! Sıfır makinede Yönetici PowerShell penceresine sağ tıklayıp yapıştırın.');
+                  }}
+                  disabled={!setupCommand}
+                  className="flex-1 py-2.5 bg-emerald-600/20 border border-emerald-500/30 hover:bg-emerald-600/30 text-emerald-400 font-medium rounded text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
+                >
+                  <Copy className="w-4 h-4" /> Kodu Kopyala
+                </button>
                 <a
-                  href="/DameWare_Agent.exe"
-                  download="DameWare_Agent.exe"
+                  href="/RemoteMM_Agent.exe"
+                  download="RemoteMM_Agent.exe"
                   className="flex-1 py-2.5 bg-sky-600 hover:bg-sky-500 text-white font-medium rounded text-xs flex items-center justify-center gap-2 decoration-none shadow-lg shadow-sky-600/20"
                 >
-                  <Download className="w-4 h-4" /> Download Agent (.EXE)
+                  <Download className="w-4 h-4" /> Çevrimdışı İndir (.EXE)
                 </a>
               </div>
             </div>

@@ -1,72 +1,59 @@
-# RemoteMM - DameWare Mini Remote Control Enterprise Studio Equivalent
+# RemoteMM 🚀
 
-**RemoteMM** is a high-performance, enterprise-grade remote desktop administration and remote control suite designed as an exact equivalent of **DameWare Mini Remote Control (DMRC)**.
+RemoteMM is a powerful, high-performance, web-based Remote Desktop & IT Management system designed to bypass common Windows restrictions (like UAC and UIPI) by running its agent at the deepest `SYSTEM` level. 
 
-![DameWare RemoteMM Architecture](https://img.shields.io/badge/DameWare-v12.2_Equivalent-0284c7?style=for-the-badge&logo=windows)
-![License](https://img.shields.io/badge/License-MIT-emerald?style=for-the-badge)
+It provides real-time desktop streaming, mouse/keyboard synchronization, remote file transfer, and an automated deployment system that easily integrates both Domain (Active Directory) and Workgroup environments.
 
----
+## ✨ Features
 
-## 🌟 Key Features
+- **True SYSTEM-Level Access:** The agent utilizes Token Duplication to spawn inside the active user session with full `SYSTEM` privileges. This allows complete interaction with elevated UAC prompts, Task Manager, and secure desktop lock screens without mouse freezing.
+- **High-Definition Web Interface:** Built with React and Vite, the control panel offers a sleek, dark-mode GUI to manage hosts.
+- **1-Click Push Deployment:** Automatically deploy the agent to Domain-joined machines via WMI/RPC without user interaction.
+- **One-Liner Workgroup Install:** Easily add non-domain machines with an auto-generated PowerShell snippet that configures the firewall and scheduled tasks in seconds.
+- **Real-Time Control:** Low-latency mouse (with drag & drop) and keyboard forwarding.
 
-- **Viewer Console & Host Directory**:
-  - Saved Address Book grouped by Domain & Department.
-  - **⚡ 1-Click Direct Connect** with stored per-host Admin credentials.
-  - Host Configuration Profile Editor (⚙️ Settings).
-  - Subnet IP Range Scanner for DameWare Agents on Port 6129.
+## 🛠️ Architecture
 
-- **DameWare Remote Actions Toolbar**:
-  - **Send Keys**: `Ctrl+Alt+Del`, `Win+L`, `Alt+Tab`, `PrintScreen`.
-  - **Input Controls**: Lock Remote Keyboard & Mouse, Blackout Remote Screen, View-Only mode.
-  - **Utilities**: Split-pane Remote File Manager, In-Session User Chat, Task Manager & Process Killer, Power Controls (Reboot, Shutdown, Logoff).
+1. **Frontend (Vite + React):** The `src/` directory contains the web control panel. It talks to the Gateway over HTTP and WebSockets.
+2. **Gateway (Node.js):** The `server/` directory runs the backend (`index.js`). It handles traffic bridging between the Web UI and the Python Agent. It also serves the agent executable (`RemoteMM_Agent.exe`) dynamically.
+3. **Agent (Python/Win32API):** The `agent/py_agent.py` script captures the GDI screen, intercepts inputs, and dynamically switches desktops (`WinSta0\Default` to `Winlogon`) to ensure the session is never lost.
 
-- **Standalone Native Agent Service (`DameWare_Agent.exe`)**:
-  - Zero external dependencies (No Node.js required on remote target VMs).
-  - Single-file standalone executable compiled for Windows 7, 10, 11, and Server 2012–2022.
-  - **On-The-Fly Auto-Push Agent Deployer**: Automatically deploys and starts agent service over SMB/WMI if port 6129 is closed.
+## 🚀 Getting Started
 
----
+### 1. Prerequisites
+- Node.js (v18+)
+- Python 3.10+ (For agent development)
+- Windows OS (The Agent requires Windows API features)
 
-## 🚀 Quick Start
-
-### 1. Launching the Viewer Console & Gateway
+### 2. Setup the Server
 ```bash
 # Install dependencies
 npm install
 
-# Start Agent Service (Port 6129)
-npm run agent
-
-# Start Gateway Server Bridge (Port 3001)
-npm run server
-
-# Launch Console UI (Port 5173)
+# Start the Gateway backend and Vite frontend concurrently
 npm run dev
 ```
 
-Open `http://localhost:5173/` in your browser.
+### 3. Deploying to Target Machines
+
+**Method A: Automatic Push (Domain Environments)**
+1. Open the RemoteMM Web UI.
+2. Click **Add Host**, enter the Target IP, Domain, and Admin Credentials.
+3. Click the **1-Click** connect button. The server will automatically push the agent via SMB/WMI.
+
+**Method B: Manual Setup (Workgroup Environments)**
+1. Open the RemoteMM Web UI.
+2. Click **Agent Deployment** at the top right.
+3. Copy the dynamically generated PowerShell command.
+4. Run the command in an **Elevated (Administrator) PowerShell** on the target machine.
+
+## 💻 Tech Stack
+- **Frontend:** React, Tailwind CSS, Lucide Icons, Vite
+- **Backend:** Node.js, Express, `ws` (WebSockets)
+- **Agent:** Python, `ctypes`, `win32gui`, `pyinstaller`
+
+## 🔒 Security Warning
+RemoteMM runs with full `SYSTEM` privileges and exposes remote screen and keyboard control. It is intended for authorized IT administration, network management, and development testing only. Ensure your firewall (Port `6129`) is properly restricted to trusted IP addresses.
 
 ---
-
-## 📁 Repository Structure
-
-```
-RemoteMM/
-├── agent/                  # DameWare Agent Service Engine & C# Source
-│   ├── native/             # DameWareAgent.cs (Standalone C# 5 native agent)
-│   └── index.js            # Node.js Agent fallback
-├── server/                 # Gateway Server & Auto-Push SMB/WMI Deployer
-│   ├── index.js            # Gateway WebSocket <-> Raw TCP Socket Bridge
-│   └── deployer.js         # Remote Agent Push Deployment Engine
-├── public/                 # Compiled DameWare_Agent.exe & QuickStart scripts
-├── src/                    # Viewer Console UI (Vite + React + Tailwind v4)
-│   ├── App.jsx             # DameWare Admin Studio Main Interface
-│   └── index.css           # Glassmorphism Dark Mode Styling
-└── package.json
-```
-
----
-
-## 🛡️ License
-
-MIT License. Designed for IT System Administrators and Enterprise Remote Support.
+*Built for absolute administrative control.*

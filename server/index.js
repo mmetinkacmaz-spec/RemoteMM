@@ -3,15 +3,45 @@ import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import net from 'net';
+import os from 'os';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { pushDeployAgent } from './deployer.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
 
 const PORT = process.env.PORT || 3001;
 const app = express();
 app.use(cors());
 app.use(express.json());
+// EXE ve diger public dosyalari HTTP ile sun
+app.use(express.static(path.join(__dirname, '..', 'public')));
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', service: 'DameWare Console Gateway', port: PORT });
+});
+
+// Uzak makine icin kurulum komutu uret
+app.get('/api/setup-command', (req, res) => {
+  const port = req.query.port || 6129;
+  // Bu sunucunun LAN IP'sini bul
+  const ifaces = os.networkInterfaces();
+  let localIp = '127.0.0.1';
+  for (const iface of Object.values(ifaces)) {
+    for (const alias of iface) {
+      if (alias.family === 'IPv4' && !alias.internal) {
+        localIp = alias.address;
+        break;
+      }
+    }
+    if (localIp !== '127.0.0.1') break;
+  }
+
+  const downloadUrl = `http://${localIp}:3001/RemoteMM_Agent.exe`;
+  const cmd = `New-Item C:\\RemoteMM -ItemType Directory -Force | Out-Null; Stop-Process -Name RemoteMM_Agent -Force -ErrorAction SilentlyContinue; Invoke-WebRequest '${downloadUrl}' -OutFile C:\\RemoteMM\\RemoteMM_Agent.exe -UseBasicParsing; netsh advfirewall firewall add rule name=RemoteMMAgent dir=in action=allow protocol=TCP localport=${port} 2>$null; schtasks /delete /tn RemoteMMAgent /f 2>$null; schtasks /create /tn RemoteMMAgent /tr 'C:\\RemoteMM\\RemoteMM_Agent.exe' /ru 'SYSTEM' /sc ONSTART /rl HIGHEST /f; schtasks /run /tn RemoteMMAgent`;
+
+  res.json({ cmd, downloadUrl, serverIp: localIp });
 });
 
 app.post('/api/agent/deploy', async (req, res) => {
