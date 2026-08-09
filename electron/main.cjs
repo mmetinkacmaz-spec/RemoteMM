@@ -1,25 +1,31 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
-const { spawn } = require('child_process');
+const { fork } = require('child_process');
 
 let mainWindow = null;
 let serverProcess = null;
 
 function startGatewayServer() {
-  const serverScript = path.join(__dirname, '..', 'server', 'index.js');
-  console.log(`[Electron] Starting background Gateway Server: ${serverScript}`);
+  const serverPath = path.join(__dirname, '..', 'server', 'index.js');
+  console.log(`[Electron] Forking background Gateway Server: ${serverPath}`);
   
   try {
-    // Import or fork server directly
-    require(serverScript);
+    serverProcess = fork(serverPath, [], {
+      env: { ...process.env, PORT: '3001' },
+      stdio: 'inherit'
+    });
+
+    serverProcess.on('error', (err) => {
+      console.error('[Electron] Server Process Error:', err);
+    });
   } catch (err) {
-    console.error(`[Electron] Error starting background gateway server:`, err);
+    console.error('[Electron] Failed to fork Gateway Server:', err);
   }
 }
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1400,
+    width: 1440,
     height: 900,
     minWidth: 1024,
     minHeight: 700,
@@ -35,12 +41,16 @@ function createWindow() {
     }
   });
 
-  const isDev = process.env.NODE_ENV === 'development';
+  const isDev = process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
   } else {
-    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    const htmlPath = path.join(__dirname, '..', 'dist', 'index.html');
+    console.log(`[Electron] Loading production UI file: ${htmlPath}`);
+    mainWindow.loadFile(htmlPath).catch((err) => {
+      console.error('[Electron] Error loading HTML file:', err);
+    });
   }
 
   // Handle external links safely
@@ -85,6 +95,9 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  if (serverProcess) {
+    try { serverProcess.kill(); } catch (e) {}
+  }
   if (process.platform !== 'darwin') {
     app.quit();
   }

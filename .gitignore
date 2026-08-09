@@ -10,6 +10,7 @@ node_modules
 dist
 dist-ssr
 dist_installer
+public/RemoteMM_Setup.exe
 *.local
 
 # Editor directories and files
