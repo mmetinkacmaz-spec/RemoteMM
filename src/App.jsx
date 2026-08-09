@@ -693,6 +693,33 @@ export default function App() {
           >
             <Download className="w-3.5 h-3.5" /> Agent Deployment
           </button>
+
+          {/* ELECTRON NATIVE TITLEBAR WINDOW CONTROLS */}
+          {typeof window !== 'undefined' && window.electronAPI && (
+            <div className="flex items-center gap-1 ml-2 pl-2 border-l border-slate-800">
+              <button
+                onClick={() => window.electronAPI.minimizeWindow()}
+                className="w-7 h-7 rounded hover:bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center text-xs transition"
+                title="Minimize Window"
+              >
+                ─
+              </button>
+              <button
+                onClick={() => window.electronAPI.maximizeWindow()}
+                className="w-7 h-7 rounded hover:bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center text-xs transition"
+                title="Maximize Window"
+              >
+                ▢
+              </button>
+              <button
+                onClick={() => window.electronAPI.closeWindow()}
+                className="w-7 h-7 rounded hover:bg-rose-600 text-slate-400 hover:text-white flex items-center justify-center text-xs transition"
+                title="Close Window"
+              >
+                ✕
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
