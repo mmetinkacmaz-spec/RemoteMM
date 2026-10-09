@@ -8,17 +8,20 @@ const __dirname  = path.dirname(__filename);
 
 const AGENT_EXE  = 'RemoteMM_Agent.exe';
 const TASK_NAME  = 'RemoteMMAgent';
-// BOŞLUKSUZ YOL - schtasks /tr argümanında boşluk escape sorunu yok
 const REMOTE_DIR = 'C:\\RemoteMM';
 const REMOTE_EXE = `${REMOTE_DIR}\\${AGENT_EXE}`;
 const UNC_DIR    = host => `\\\\${host}\\C$\\RemoteMM`;
 
 function run(cmd, timeout = 30000) {
-  return new Promise(resolve =>
-    exec(cmd, { timeout }, (err, stdout, stderr) =>
-      resolve({ ok: !err, out: stdout || '', err: stderr || '' })
-    )
-  );
+  return new Promise(resolve => {
+    const proc = exec(cmd, { timeout, windowsHide: true }, (err, stdout, stderr) => {
+      resolve({ ok: !err, out: stdout || '', err: stderr || '' });
+    });
+    // Immediately close stdin so child processes like schtasks never hang waiting for input
+    if (proc.stdin) {
+      try { proc.stdin.end(); } catch (e) {}
+    }
+  });
 }
 
 async function portOpenPs(host, port) {
@@ -51,68 +54,100 @@ export async function pushDeployAgent({
   const src = path.join(__dirname, '..', 'public', AGENT_EXE);
   const pw  = password || '';
 
-  // ── 1. SMB Baglantisi ──────────────────────────────────────
-  log(`📡 Adım 1: SMB bağlantısı deneniyor...`);
-  const smb = await smbConnect(targetHost, username, pw);
-  log(smb.ok
-    ? `✅ SMB bağlandı (${smb.user}) — C$ erişimi var.`
-    : `⚠️ C$ erişimi yok — mevcut EXE kullanılmaya çalışılacak.`
-  );
+  const isLocal = targetHost === '127.0.0.1' || targetHost === 'localhost' || targetHost === '::1';
+  const targetHostParam = isLocal ? '' : `/s ${targetHost}`;
+  const credsParam = (isLocal || !pw) ? '' : `/u "${username}" /p "${pw}"`;
+  const remoteArgs = [targetHostParam, credsParam].filter(Boolean).join(' ');
+  const remotePrefix = remoteArgs ? `${remoteArgs} ` : '';
+
+  // ── 1. SMB veya Yerel Kopyalama ───────────────────────────
+  log(`📡 Adım 1: Bağlantı yöntemi belirleniyor...`);
+  let canDirectCopy = false;
+
+  if (isLocal) {
+    log(`ℹ️ Yerel makine algılandı. Doğrudan dosya kopyalanacak.`);
+    canDirectCopy = true;
+  } else {
+    log(`📡 SMB C$ bağlantısı deneniyor...`);
+    const smb = await smbConnect(targetHost, username, pw);
+    if (smb.ok) {
+      log(`✅ SMB bağlandı (${smb.user}) — C$ erişimi var.`);
+      canDirectCopy = true;
+    } else {
+      log(`⚠️ C$ erişimi yok — HTTP üzerinden indirme yöntemi kullanılacak.`);
+    }
+  }
 
   // ── 2. Eski gorevi sil ─────────────────────────────────────
   log(`🛑 Adım 2: Eski görev siliniyor...`);
-  await run(`schtasks /delete /s ${targetHost} /u "${username}" /p "${pw}" /tn "${TASK_NAME}" /f`, 15000);
-  await new Promise(r => setTimeout(r, 800));
+  await run(`schtasks /delete ${remotePrefix}/tn "${TASK_NAME}" /f`, 15000);
+  await new Promise(r => setTimeout(r, 600));
 
-  // ── 3. EXE kopyala (sadece C$ bagliysa) ───────────────────
-  if (smb.ok) {
-    log(`📋 Adım 3: Agent kopyalanıyor → ${REMOTE_EXE}`);
-    const unc = UNC_DIR(targetHost);
-    await run(`powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '${unc}' | Out-Null"`);
-    const cp = await run(`powershell -NoProfile -ExecutionPolicy Bypass -Command "Copy-Item -Path '${src.replace(/'/g, "''")}' -Destination '${unc}\\${AGENT_EXE}' -Force"`, 20000);
-    log(cp.ok ? `✅ Agent kopyalandı.` : `⚠️ Kopya: ${cp.err.split('\n')[0].trim()}`);
+  // ── 3. EXE kopyala veya HTTP ile indir ────────────────────
+  if (canDirectCopy) {
+    log(`📋 Adım 3: Agent doğrudan kopyalanıyor → ${REMOTE_EXE}`);
+    if (isLocal) {
+      await run(`powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '${REMOTE_DIR}' | Out-Null; Copy-Item -Path '${src.replace(/'/g, "''")}' -Destination '${REMOTE_EXE}' -Force"`);
+    } else {
+      const unc = UNC_DIR(targetHost);
+      await run(`powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '${unc}' | Out-Null"`);
+      await run(`powershell -NoProfile -ExecutionPolicy Bypass -Command "Copy-Item -Path '${src.replace(/'/g, "''")}' -Destination '${unc}\\${AGENT_EXE}' -Force"`, 20000);
+    }
   } else {
     log(`ℹ️ Adım 3: SMB başarısız. HTTP üzerinden agent indirme komutu gönderiliyor...`);
     let localIp = '127.0.0.1';
+    const cands = [];
     for (const iface of Object.values(os.networkInterfaces())) {
       for (const alias of iface) {
-        if (alias.family === 'IPv4' && !alias.internal) { localIp = alias.address; break; }
+        if (alias.family === 'IPv4' && !alias.internal) cands.push(alias.address);
+      }
+    }
+    if (cands.length > 0) {
+      const parts = targetHost.split('.');
+      if (parts.length === 4) {
+        const prefix = `${parts[0]}.${parts[1]}.`;
+        const m = cands.find(ip => ip.startsWith(prefix));
+        localIp = m || cands[0];
+      } else {
+        localIp = cands[0];
       }
     }
     const dlUrl = `http://${localIp}:3001/${AGENT_EXE}`;
-    const dlCmd = `powershell -WindowStyle Hidden -Command "New-Item C:\\RemoteMM -ItemType Directory -Force | Out-Null; Stop-Process -Name RemoteMM_Agent -Force -ErrorAction SilentlyContinue; Invoke-WebRequest '${dlUrl}' -OutFile '${REMOTE_EXE}' -UseBasicParsing"`;
+    const psScript = `[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; New-Item C:\\RemoteMM -ItemType Directory -Force | Out-Null; Stop-Process -Name RemoteMM_Agent -Force -ErrorAction SilentlyContinue; Invoke-WebRequest '${dlUrl}' -OutFile '${REMOTE_EXE}' -UseBasicParsing`;
+    const b64 = Buffer.from(psScript, 'utf16le').toString('base64');
+    const dlCmd = `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${b64}`;
     
     log(`📥 İndirme görevi oluşturuluyor...`);
-    await run(`schtasks /create /s ${targetHost} /u "${username}" /p "${pw}" /tn "RemoteMM_Downloader" /tr "${dlCmd.replace(/"/g, '\\"')}" /sc ONSTART /ru "SYSTEM" /rl HIGHEST /f`, 15000);
+    await run(`schtasks /create ${remotePrefix}/tn "RemoteMM_Downloader" /tr "${dlCmd}" /sc ONSTART /ru "SYSTEM" /rl HIGHEST /f`, 15000);
     log(`🚀 İndirme görevi çalıştırılıyor...`);
-    await run(`schtasks /run /s ${targetHost} /u "${username}" /p "${pw}" /tn "RemoteMM_Downloader"`, 10000);
-    await new Promise(r => setTimeout(r, 6000)); // Wait for download to finish
-    await run(`schtasks /delete /s ${targetHost} /u "${username}" /p "${pw}" /tn "RemoteMM_Downloader" /f`, 10000);
+    await run(`schtasks /run ${remotePrefix}/tn "RemoteMM_Downloader"`, 10000);
+    await new Promise(r => setTimeout(r, 6000));
+    await run(`schtasks /delete ${remotePrefix}/tn "RemoteMM_Downloader" /f`, 10000);
   }
 
-  // ── 4. Gorev Olustur (schtasks - kullanici oturumu) ────────
-  log(`⚙️ Adım 4: Görev oluşturuluyor...`);
-  const trCmd = `${REMOTE_EXE}`;
+  // ── 4. Windows Servisi / Gorevi Yapilandir ────────────────
+  log(`⚙️ Adım 4: Windows Servisi yapılandırılıyor...`);
+  if (!isLocal) {
+    await run(`sc.exe \\\\${targetHost} create ${TASK_NAME} binPath= "${REMOTE_EXE}" start= auto DisplayName= "RemoteMM Support Agent"`, 10000);
+    await run(`sc.exe \\\\${targetHost} config ${TASK_NAME} binPath= "${REMOTE_EXE}" start= auto`, 10000);
+  } else {
+    await run(`sc.exe create ${TASK_NAME} binPath= "${REMOTE_EXE}" start= auto DisplayName= "RemoteMM Support Agent"`, 10000);
+  }
 
-  const create = await run(
-    `schtasks /create /s ${targetHost} /u "${username}" /p "${pw}" /tn "${TASK_NAME}" /tr "${trCmd}" /sc ONSTART /ru "SYSTEM" /rl HIGHEST /f`,
-    20000
-  );
-  log(create.ok
-    ? `✅ Görev oluşturuldu.`
-    : `⚠️ Görev: ${(create.out || create.err).trim().split('\n').find(l => l.trim()) || 'Bilinmeyen hata'}`
-  );
+  // ── 5. Servisi Hemen Calistir ───────────────────────────────
+  log(`🚀 Adım 5: Servis başlatılıyor...`);
+  const scStart = isLocal
+    ? await run(`sc.exe start ${TASK_NAME}`, 10000)
+    : await run(`sc.exe \\\\${targetHost} start ${TASK_NAME}`, 10000);
 
-  // ── 5. Gorevi Hemen Calistir ───────────────────────────────
-  log(`🚀 Adım 5: Görev çalıştırılıyor...`);
-  const runCmd = await run(
-    `schtasks /run /s ${targetHost} /u "${username}" /p "${pw}" /tn "${TASK_NAME}"`,
-    15000
-  );
-  log(runCmd.ok
-    ? `✅ Görev başlatıldı!`
-    : `⚠️ Çalıştırma: ${(runCmd.out || runCmd.err).trim().split('\n')[0]}`
-  );
+  if (scStart.ok) {
+    log(`✅ Windows Servisi başarıyla başlatıldı!`);
+  } else {
+    log(`ℹ️ Servis başlatma bildirimi: ${(scStart.out || scStart.err).trim().split('\n')[0] || 'SCM tetiklendi'}`);
+    // Fallback: schtasks
+    await run(`schtasks /create ${remotePrefix}/tn "${TASK_NAME}" /tr "${REMOTE_EXE}" /sc ONSTART /ru "SYSTEM" /rl HIGHEST /f`, 10000);
+    await run(`schtasks /run ${remotePrefix}/tn "${TASK_NAME}"`, 10000);
+  }
 
   // ── 6. Port Dogrula ────────────────────────────────────────
   log(`🔍 Adım 6: Port ${port} bekleniyor...`);
@@ -125,6 +160,6 @@ export async function pushDeployAgent({
     log(`⏳ Başlatılıyor... (${i + 1}/12)`);
   }
 
-  log(`❌ Port açılmadı. Uzak makinede "${REMOTE_EXE} --server" komutunu elle çalıştırın.`);
+  log(`❌ Port açılmadı. Uzak makinede "${REMOTE_EXE}" komutunu elle çalıştırın.`);
   return { success: false };
 }

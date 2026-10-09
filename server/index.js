@@ -22,24 +22,38 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', service: 'DameWare Console Gateway', port: PORT });
 });
 
+export function getBestLocalIp(targetHost = '') {
+  const ifaces = os.networkInterfaces();
+  const candidates = [];
+  for (const [name, list] of Object.entries(ifaces)) {
+    for (const alias of list) {
+      if (alias.family === 'IPv4' && !alias.internal) {
+        candidates.push({ name, ip: alias.address });
+      }
+    }
+  }
+  if (candidates.length === 0) return '127.0.0.1';
+
+  if (targetHost && targetHost !== '127.0.0.1' && targetHost !== 'localhost') {
+    const parts = targetHost.split('.');
+    if (parts.length === 4) {
+      const prefix = `${parts[0]}.${parts[1]}.`;
+      const match = candidates.find(c => c.ip.startsWith(prefix));
+      if (match) return match.ip;
+    }
+  }
+  return candidates[0].ip;
+}
+
 // Uzak makine icin kurulum komutu uret
 app.get('/api/setup-command', (req, res) => {
   const port = req.query.port || 6129;
-  // Bu sunucunun LAN IP'sini bul
-  const ifaces = os.networkInterfaces();
-  let localIp = '127.0.0.1';
-  for (const iface of Object.values(ifaces)) {
-    for (const alias of iface) {
-      if (alias.family === 'IPv4' && !alias.internal) {
-        localIp = alias.address;
-        break;
-      }
-    }
-    if (localIp !== '127.0.0.1') break;
-  }
+  const targetHost = req.query.target || '';
+  const localIp = getBestLocalIp(targetHost);
 
   const downloadUrl = `http://${localIp}:3001/RemoteMM_Agent.exe`;
-  const cmd = `New-Item C:\\RemoteMM -ItemType Directory -Force | Out-Null; Stop-Process -Name RemoteMM_Agent -Force -ErrorAction SilentlyContinue; Invoke-WebRequest '${downloadUrl}' -OutFile C:\\RemoteMM\\RemoteMM_Agent.exe -UseBasicParsing; netsh advfirewall firewall add rule name=RemoteMMAgent dir=in action=allow protocol=TCP localport=${port} 2>$null; schtasks /delete /tn RemoteMMAgent /f 2>$null; schtasks /create /tn RemoteMMAgent /tr 'C:\\RemoteMM\\RemoteMM_Agent.exe' /ru 'SYSTEM' /sc ONSTART /rl HIGHEST /f; schtasks /run /tn RemoteMMAgent`;
+  const innerCmd = `[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; New-Item C:\\RemoteMM -ItemType Directory -Force | Out-Null; Stop-Process -Name RemoteMM_Agent -Force -ErrorAction SilentlyContinue; Invoke-WebRequest '${downloadUrl}' -OutFile C:\\RemoteMM\\RemoteMM_Agent.exe -UseBasicParsing; netsh advfirewall firewall add rule name=RemoteMMAgent dir=in action=allow protocol=TCP localport=${port} 2>&1 | Out-Null; schtasks /delete /tn RemoteMMAgent /f 2>&1 | Out-Null; schtasks /create /tn RemoteMMAgent /tr 'C:\\RemoteMM\\RemoteMM_Agent.exe' /ru 'SYSTEM' /sc ONSTART /rl HIGHEST /f; schtasks /run /tn RemoteMMAgent`;
+  const cmd = `powershell -ExecutionPolicy Bypass -Command "${innerCmd}"`;
 
   res.json({ cmd, downloadUrl, serverIp: localIp });
 });
@@ -76,6 +90,10 @@ wss.on('connection', (ws, req) => {
   const tryConnect = () => {
     if (isCancelled) return;
 
+    buffer = ''; // Always start with a clean buffer
+    if (tcpClient && !tcpClient.destroyed) {
+      try { tcpClient.destroy(); } catch (e) {}
+    }
     tcpClient = new net.Socket();
     tcpClient.setTimeout(3500);
 
@@ -91,12 +109,20 @@ wss.on('connection', (ws, req) => {
     tcpClient.on('data', (chunk) => {
       if (isCancelled) return;
       buffer += chunk.toString('utf8');
+
+      if (buffer.length > 500000) {
+        console.warn('[Gateway] Buffer exceeded 500KB, clearing corrupted stream');
+        buffer = '';
+        return;
+      }
+
       let lines = buffer.split('\n');
       buffer = lines.pop();
 
       for (let line of lines) {
-        if (line.trim() && ws.readyState === WebSocket.OPEN && !isCancelled) {
-          ws.send(line.trim());
+        line = line.trim();
+        if (line && ws.readyState === WebSocket.OPEN && !isCancelled) {
+          ws.send(line);
         }
       }
     });
@@ -105,9 +131,34 @@ wss.on('connection', (ws, req) => {
     tcpClient.on('error', handleConnectionFailure);
 
     tcpClient.on('close', () => {
-      if (isConnected && ws.readyState === WebSocket.OPEN && !isCancelled) {
-        ws.close();
-      }
+      buffer = '';
+      if (isCancelled || ws.readyState !== WebSocket.OPEN) return;
+      
+      console.log(`[Gateway] Agent TCP connection closed (session switch or restart). Reconnecting to ${targetHost}:${targetPort}...`);
+      sendProgressToConsole(ws, 'Oturum geçişi algılandı (Giriş yapılıyor...), masaüstüne bağlanılıyor...');
+      
+      let retryCount = 0;
+      const retryInterval = setInterval(() => {
+        if (isCancelled || ws.readyState !== WebSocket.OPEN) {
+          clearInterval(retryInterval);
+          return;
+        }
+        retryCount++;
+        const testSock = new net.Socket();
+        testSock.connect(targetPort, targetHost, () => {
+          testSock.destroy();
+          clearInterval(retryInterval);
+          console.log(`[Gateway] Agent in new session is active! Resuming TCP session...`);
+          tryConnect();
+        });
+        testSock.on('error', () => {
+          testSock.destroy();
+          if (retryCount >= 15) {
+            clearInterval(retryInterval);
+            if (ws.readyState === WebSocket.OPEN) ws.close();
+          }
+        });
+      }, 600);
     });
   };
 
