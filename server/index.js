@@ -6,10 +6,14 @@ import net from 'net';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { exec } from 'child_process';
 import { pushDeployAgent } from './deployer.js';
+import { sendWakeOnLan, getMacFromIp } from './wol.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
+
+export const CURRENT_AGENT_VERSION = 'RemoteMM v4.2';
 
 const PORT = process.env.PORT || 3001;
 const app = express();
@@ -19,7 +23,270 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', service: 'DameWare Console Gateway', port: PORT });
+  res.json({ status: 'OK', service: 'DameWare Console Gateway', port: PORT, agentVersion: CURRENT_AGENT_VERSION });
+});
+
+// Wake-on-LAN (WoL) Paketi Gonder
+app.post('/api/power/wol', async (req, res) => {
+  const { mac, ip, broadcastIp } = req.body;
+  try {
+    let targetMac = mac;
+    if (!targetMac && ip) {
+      targetMac = await getMacFromIp(ip);
+    }
+    if (!targetMac) {
+      return res.status(400).json({ success: false, error: 'MAC adresi bulunamadı veya belirtilmedi.' });
+    }
+    const result = await sendWakeOnLan(targetMac, broadcastIp || '255.255.255.255');
+    console.log(`[WoL] Magic Packet sent to ${targetMac}`);
+    res.json({ success: true, mac: targetMac, message: `Wake-on-LAN sihirli paketi ${targetMac} adresine gönderildi.` });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// IP uzerinden ARP ile MAC adresi bulma
+app.get('/api/power/mac', async (req, res) => {
+  const ip = req.query.ip;
+  if (!ip) return res.status(400).json({ error: 'IP parametresi belirtilmedi' });
+  const mac = await getMacFromIp(ip);
+  res.json({ ip, mac: mac || null });
+});
+
+// Uzaktan Guc Yonetimi (Ajan uzerinden SYSTEM yetkisiyle veya Windows ag komutuyla)
+app.post('/api/power/action', async (req, res) => {
+  const { targetHost, port, action } = req.body;
+  if (!targetHost || !action) return res.status(400).json({ error: 'Eksik parametreler' });
+
+  const targetPort = parseInt(port || '6129', 10);
+  let responded = false;
+
+  // 1. Doğrudan agent soketine bağlanıp SYSTEM yetkisiyle POWER_ACTION gönder
+  const sock = new net.Socket();
+  sock.setTimeout(3000);
+
+  sock.connect(targetPort, targetHost, () => {
+    try {
+      sock.write(JSON.stringify({ type: 'POWER_ACTION', action }) + '\n');
+    } catch (e) {}
+    setTimeout(() => {
+      if (!responded) {
+        responded = true;
+        try { sock.destroy(); } catch (e) {}
+        return res.json({ success: true, method: 'agent_direct', action });
+      }
+    }, 250);
+  });
+
+  sock.on('error', () => {
+    if (!responded) {
+      responded = true;
+      try { sock.destroy(); } catch (e) {}
+      fallbackPowerRpc(targetHost, action, res);
+    }
+  });
+
+  sock.on('timeout', () => {
+    if (!responded) {
+      responded = true;
+      try { sock.destroy(); } catch (e) {}
+      fallbackPowerRpc(targetHost, action, res);
+    }
+  });
+});
+
+function fallbackPowerRpc(targetHost, action, res) {
+  const isLocal = targetHost === '127.0.0.1' || targetHost === 'localhost';
+  let cmd = '';
+  if (action === 'shutdown') {
+    cmd = isLocal ? 'shutdown /s /f /t 1' : `shutdown /m \\\\${targetHost} /s /f /t 1`;
+  } else if (action === 'reboot') {
+    cmd = isLocal ? 'shutdown /r /f /t 1' : `shutdown /m \\\\${targetHost} /r /f /t 1`;
+  } else if (action === 'abort') {
+    cmd = isLocal ? 'shutdown /a' : `shutdown /m \\\\${targetHost} /a`;
+  } else if (action === 'lock') {
+    cmd = isLocal ? 'rundll32.exe user32.dll,LockWorkStation' : '';
+  }
+
+  if (cmd) {
+    exec(cmd, (err, stdout, stderr) => {
+      res.json({ success: !err, method: 'windows_rpc', out: stdout || '', err: stderr || '' });
+    });
+  } else {
+    res.json({ success: false, error: 'Ajan kapalıyken bu güç eylemi uzaktan çalıştırılamaz.' });
+  }
+}
+
+// ─── FLEET NOC: CANLI EKRAN ONIZLEME VE STATUS MOTORU ────────
+export function checkPortOpen(host, port, timeout = 1200) {
+  return new Promise(resolve => {
+    const s = new net.Socket();
+    s.setTimeout(timeout);
+    s.once('connect', () => { s.destroy(); resolve(true); });
+    s.once('timeout', () => { s.destroy(); resolve(false); });
+    s.once('error', () => { s.destroy(); resolve(false); });
+    try {
+      s.connect(port, host);
+    } catch (e) {
+      resolve(false);
+    }
+  });
+}
+
+function grabSingleFrame(host, port, timeout = 3500) {
+  return new Promise((resolve) => {
+    let socket = new net.Socket();
+    let buffer = '';
+    let resolved = false;
+    let handshakeInfo = {};
+
+    const cleanup = (resVal) => {
+      if (resolved) return;
+      resolved = true;
+      try { socket.destroy(); } catch (e) {}
+      resolve(resVal);
+    };
+
+    socket.setTimeout(timeout);
+    socket.once('timeout', () => cleanup(null));
+    socket.once('error', () => cleanup(null));
+
+    socket.connect(port, host, () => {
+      try {
+        socket.write(JSON.stringify({ type: 'MOUSE_INPUT', action: 'move', xPercent: 0.5, yPercent: 0.5 }) + '\n');
+      } catch (e) {}
+    });
+
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      if (buffer.length > 20 * 1024 * 1024) {
+        cleanup(null);
+        return;
+      }
+      let lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (let line of lines) {
+        line = line.trim();
+        if (!line) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.type === 'HANDSHAKE_ACK') {
+            handshakeInfo = {
+              user: msg.user,
+              hostname: msg.hostname,
+              width: msg.screenWidth,
+              height: msg.screenHeight
+            };
+          } else if (msg.type === 'SCREEN_FRAME' && msg.frame) {
+            cleanup({
+              frame: msg.frame,
+              user: handshakeInfo.user || 'User',
+              hostname: handshakeInfo.hostname || host,
+              width: handshakeInfo.width || 1920,
+              height: handshakeInfo.height || 1080
+            });
+            return;
+          }
+        } catch (e) {}
+      }
+    });
+  });
+}
+
+const thumbnailCache = new Map();
+
+// Tekil sunucu ekran anlik goruntusu (JSON Base64)
+app.get('/api/fleet/snapshot', async (req, res) => {
+  const host = req.query.host;
+  const port = parseInt(req.query.port || '6129', 10);
+  if (!host) return res.status(400).json({ error: 'host parametresi gerekli' });
+
+  // 2 saniyelik onbellek kontrolu (veya fresh=true ise aninda canli yakala)
+  const cached = thumbnailCache.get(host);
+  if (cached && (Date.now() - cached.timestamp < 2000) && !req.query.fresh) {
+    return res.json({ success: true, online: true, ...cached });
+  }
+
+  const isOnline = await checkPortOpen(host, port, 1000);
+  if (!isOnline) {
+    return res.json({ success: false, online: false, host, error: 'Makine kapalı veya port kapalı' });
+  }
+
+  try {
+    const frameData = await grabSingleFrame(host, port, 2000);
+    if (frameData) {
+      const entry = {
+        frame: frameData.frame,
+        snapshot: frameData.frame,
+        user: frameData.user,
+        hostname: frameData.hostname,
+        width: frameData.width,
+        height: frameData.height,
+        timestamp: Date.now()
+      };
+      thumbnailCache.set(host, entry);
+      return res.json({ success: true, online: true, host, ...entry });
+    } else {
+      return res.json({ success: false, online: true, host, error: 'Ekran görüntüsü alınamadı' });
+    }
+  } catch (err) {
+    return res.json({ success: false, online: false, host, error: err.message });
+  }
+});
+
+// Dogrudan binary JPEG gorsel donduren endpoint (HTML <img> etiketleri icin)
+app.get('/api/fleet/thumbnail', async (req, res) => {
+  const host = req.query.host;
+  const port = parseInt(req.query.port || '6129', 10);
+  if (!host) return res.status(400).send('host parametresi gerekli');
+
+  const cached = thumbnailCache.get(host);
+  if (cached && (Date.now() - cached.timestamp < 8000) && cached.frame) {
+    res.setHeader('Content-Type', 'image/jpeg');
+    return res.send(Buffer.from(cached.frame, 'base64'));
+  }
+
+  const isOnline = await checkPortOpen(host, port, 1200);
+  if (!isOnline) {
+    return res.status(503).send('Makine çevrimdışı');
+  }
+
+  const frameData = await grabSingleFrame(host, port, 3000);
+  if (frameData && frameData.frame) {
+    thumbnailCache.set(host, {
+      frame: frameData.frame,
+      user: frameData.user,
+      hostname: frameData.hostname,
+      width: frameData.width,
+      height: frameData.height,
+      timestamp: Date.now()
+    });
+    res.setHeader('Content-Type', 'image/jpeg');
+    return res.send(Buffer.from(frameData.frame, 'base64'));
+  }
+  res.status(500).send('Görüntü yakalanamadı');
+});
+
+// Coklu sunucularin online/offline durumlarini toplu sorgulama
+app.post('/api/fleet/status', async (req, res) => {
+  const hosts = req.body.hosts || [];
+  const results = {};
+
+  await Promise.all(hosts.map(async (h) => {
+    const start = Date.now();
+    const port = parseInt(h.port || '6129', 10);
+    const ip = h.ip;
+    const online = await checkPortOpen(ip, port, 1000);
+    const latency = Date.now() - start;
+    results[h.id || ip] = {
+      online,
+      latency: online ? latency : null,
+      lastCheck: Date.now()
+    };
+  }));
+
+  res.json({ success: true, statuses: results });
 });
 
 export function getBestLocalIp(targetHost = '') {
@@ -45,23 +312,22 @@ export function getBestLocalIp(targetHost = '') {
   return candidates[0].ip;
 }
 
-// Uzak makine icin kurulum komutu uret
+// Uzak makine icin kurulum komutu uret (Kisa irm install.ps1 | iex komutu)
 app.get('/api/setup-command', (req, res) => {
   const port = req.query.port || 6129;
   const targetHost = req.query.target || '';
   const localIp = getBestLocalIp(targetHost);
 
   const downloadUrl = `http://${localIp}:3001/RemoteMM_Agent.exe`;
-  const innerCmd = `[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; New-Item C:\\RemoteMM -ItemType Directory -Force | Out-Null; Stop-Process -Name RemoteMM_Agent -Force -ErrorAction SilentlyContinue; Invoke-WebRequest '${downloadUrl}' -OutFile C:\\RemoteMM\\RemoteMM_Agent.exe -UseBasicParsing; netsh advfirewall firewall add rule name=RemoteMMAgent dir=in action=allow protocol=TCP localport=${port} 2>&1 | Out-Null; schtasks /delete /tn RemoteMMAgent /f 2>&1 | Out-Null; schtasks /create /tn RemoteMMAgent /tr 'C:\\RemoteMM\\RemoteMM_Agent.exe' /ru 'SYSTEM' /sc ONSTART /rl HIGHEST /f; schtasks /run /tn RemoteMMAgent`;
-  const cmd = `powershell -ExecutionPolicy Bypass -Command "${innerCmd}"`;
+  const cmd = `powershell -ExecutionPolicy Bypass -Command "irm http://${localIp}:3001/install.ps1 | iex"`;
 
-  res.json({ cmd, downloadUrl, serverIp: localIp });
+  res.json({ cmd, downloadUrl, serverIp: localIp, agentVersion: CURRENT_AGENT_VERSION });
 });
 
 app.post('/api/agent/deploy', async (req, res) => {
-  const { targetHost, domain, username, password, port } = req.body;
+  const { targetHost, domain, username, password, port, force } = req.body;
   try {
-    const result = await pushDeployAgent({ targetHost, domain, username, password, port });
+    const result = await pushDeployAgent({ targetHost, domain, username, password, port, force });
     res.json(result);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -78,14 +344,48 @@ wss.on('connection', (ws, req) => {
   const domain = params.get('domain') || 'WORKGROUP';
   const username = params.get('username') || 'Administrator';
   const password = params.get('password') || '';
+  const targetMac = params.get('mac') || '';
+  const forceReinstall = params.get('force') === 'true' || params.get('reinstall') === 'true';
 
-  console.log(`[Gateway] Initiating session to ${targetHost}:${targetPort}...`);
+  console.log(`[Gateway] Initiating session to ${targetHost}:${targetPort} (mac: ${targetMac || 'auto'}, forceReinstall: ${forceReinstall})...`);
 
   let isConnected = false;
   let isCancelled = false;
   let hasAttemptedPush = false;
+  let hasAttemptedUpgrade = false;
   let tcpClient = new net.Socket();
   let buffer = '';
+
+  const triggerDeployAndConnect = async (reasonMsg) => {
+    if (hasAttemptedPush || isCancelled) return;
+    hasAttemptedPush = true;
+    console.log(`[Gateway] ${reasonMsg} -> Running Remote Push Deployment on ${targetHost}...`);
+    sendProgressToConsole(ws, reasonMsg);
+
+    try {
+      const deployRes = await pushDeployAgent({
+        targetHost,
+        domain,
+        username,
+        password,
+        port: targetPort,
+        force: true,
+        onProgress: (msg) => sendProgressToConsole(ws, msg)
+      });
+
+      if (deployRes.success) {
+        sendProgressToConsole(ws, `Agent başarıyla hazırlandı! Ekrana bağlanılıyor...`);
+        setTimeout(() => {
+          if (!isCancelled) tryConnect();
+        }, 1200);
+      } else {
+        sendErrorToConsole(ws, 'ERR_DEPLOY_FAILED', `Agent otomatik kurulamadı. Lütfen uzak makinede agent'ı başlatın.`);
+      }
+    } catch (deployErr) {
+      console.log(`[Gateway] Push Deployment error: ${deployErr.message}`);
+      sendErrorToConsole(ws, 'ERR_DEPLOY_ERROR', `Kurulum hatası: ${deployErr.message}`);
+    }
+  };
 
   const tryConnect = () => {
     if (isCancelled) return;
@@ -95,13 +395,16 @@ wss.on('connection', (ws, req) => {
       try { tcpClient.destroy(); } catch (e) {}
     }
     tcpClient = new net.Socket();
-    tcpClient.setTimeout(3500);
+    tcpClient.setTimeout(4000);
 
     tcpClient.connect(targetPort, targetHost, () => {
       if (isCancelled) {
         tcpClient.destroy();
         return;
       }
+      tcpClient.setTimeout(0); // Bağlantı kurulduktan sonra idle timeout'u tamamen kapat!
+      tcpClient.setKeepAlive(true, 1000);
+      tcpClient.setNoDelay(true);
       isConnected = true;
       console.log(`[Gateway] Connected directly to Agent on ${targetHost}:${targetPort}`);
     });
@@ -110,18 +413,36 @@ wss.on('connection', (ws, req) => {
       if (isCancelled) return;
       buffer += chunk.toString('utf8');
 
-      if (buffer.length > 500000) {
-        console.warn('[Gateway] Buffer exceeded 500KB, clearing corrupted stream');
+      if (buffer.length > 25 * 1024 * 1024) {
+        console.warn('[Gateway] Buffer exceeded 25MB without newline, resetting buffer');
         buffer = '';
         return;
       }
 
-      let lines = buffer.split('\n');
-      buffer = lines.pop();
+      let lineEnd;
+      while ((lineEnd = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, lineEnd).trim();
+        buffer = buffer.slice(lineEnd + 1);
+        if (!line) continue;
 
-      for (let line of lines) {
-        line = line.trim();
-        if (line && ws.readyState === WebSocket.OPEN && !isCancelled) {
+        let isFrame = false;
+        try {
+          if (line.charCodeAt(0) === 123) {
+            if (line.includes('"SCREEN_FRAME"')) {
+              isFrame = true;
+            } else if (line.includes('"HANDSHAKE_ACK"')) {
+              const parsed = JSON.parse(line);
+              const remoteVer = parsed.agentVersion || 'v1.0';
+              console.log(`[Gateway] Agent Handshake ACK: Remote version "${remoteVer}" connected on ${targetHost}:${targetPort}`);
+            }
+          }
+        } catch (e) {}
+
+        if (ws.readyState === WebSocket.OPEN && !isCancelled) {
+          // Backpressure protection: eger ag/tarayici yetisemiyorsa bayat video karesini atla
+          if (isFrame && ws.bufferedAmount > 512 * 1024) {
+            continue;
+          }
           ws.send(line);
         }
       }
@@ -134,65 +455,39 @@ wss.on('connection', (ws, req) => {
       buffer = '';
       if (isCancelled || ws.readyState !== WebSocket.OPEN) return;
       
-      console.log(`[Gateway] Agent TCP connection closed (session switch or restart). Reconnecting to ${targetHost}:${targetPort}...`);
-      sendProgressToConsole(ws, 'Oturum geçişi algılandı (Giriş yapılıyor...), masaüstüne bağlanılıyor...');
+      if (!isConnected) return;
+      isConnected = false;
+
+      console.log(`[Gateway] Agent TCP connection closed. Reconnecting to ${targetHost}:${targetPort}...`);
+      sendProgressToConsole(ws, 'Bağlantı yenileniyor, masaüstüne bağlanılıyor...');
       
-      let retryCount = 0;
-      const retryInterval = setInterval(() => {
-        if (isCancelled || ws.readyState !== WebSocket.OPEN) {
-          clearInterval(retryInterval);
-          return;
-        }
-        retryCount++;
-        const testSock = new net.Socket();
-        testSock.connect(targetPort, targetHost, () => {
-          testSock.destroy();
-          clearInterval(retryInterval);
-          console.log(`[Gateway] Agent in new session is active! Resuming TCP session...`);
+      setTimeout(() => {
+        if (!isCancelled && ws.readyState === WebSocket.OPEN) {
           tryConnect();
-        });
-        testSock.on('error', () => {
-          testSock.destroy();
-          if (retryCount >= 15) {
-            clearInterval(retryInterval);
-            if (ws.readyState === WebSocket.OPEN) ws.close();
-          }
-        });
-      }, 600);
+        }
+      }, 1000);
     });
   };
 
   const handleConnectionFailure = async (err) => {
     if (isConnected || isCancelled) return;
-    tcpClient.destroy();
+    try { tcpClient.destroy(); } catch (e) {}
 
-    // AUTOMATIC AGENT PUSH DEPLOYMENT IF PORT IS CLOSED & NOT YET ATTEMPTED
+    // AUTOMATIC AGENT PUSH DEPLOYMENT & WAKE-ON-LAN IF PORT IS CLOSED & NOT YET ATTEMPTED
     if (!hasAttemptedPush) {
-      hasAttemptedPush = true;
-      console.log(`[Gateway] Agent port ${targetPort} unreachable on ${targetHost}. Launching Automatic Remote Push Deployment...`);
-
-      sendProgressToConsole(ws, `Agent port ${targetPort} closed. Automatically pushing and launching DameWare_Agent.exe on ${targetHost}...`);
-
+      // Eger hedef makine ulasilamazsa Wake-on-LAN sihirli paketi gonder
       try {
-        await pushDeployAgent({
-          targetHost,
-          domain,
-          username,
-          password,
-          port: targetPort,
-          onProgress: (msg) => sendProgressToConsole(ws, msg)
-        });
+        let macToWake = targetMac;
+        if (!macToWake) macToWake = await getMacFromIp(targetHost);
+        if (macToWake) {
+          console.log(`[Gateway] Hedef makine kapalı olabilir. Wake-on-LAN paketi (${macToWake}) gönderiliyor...`);
+          sendProgressToConsole(ws, `⚡ Hedef makine kapalı olabilir. Wake-on-LAN paketi (${macToWake}) gönderildi...`);
+          await sendWakeOnLan(macToWake).catch(() => {});
+        }
+      } catch (e) {}
 
-        console.log(`[Gateway] Push Deployment completed. Retrying direct TCP connection to ${targetHost}:${targetPort}...`);
-        sendProgressToConsole(ws, `Agent launched! Connecting to remote screen...`);
-
-        setTimeout(() => {
-          if (!isCancelled) tryConnect();
-        }, 1500);
-        return;
-      } catch (deployErr) {
-        console.log(`[Gateway] Push Deployment notice: ${deployErr.message}`);
-      }
+      await triggerDeployAndConnect(`Agent kapalı veya kurulu değil (${targetHost}:${targetPort}). Otomatik kurulum başlatılıyor...`);
+      return;
     }
 
     // If already attempted push or push failed, return crisp error
@@ -201,7 +496,7 @@ wss.on('connection', (ws, req) => {
     if (err && err.code === 'ENOTFOUND') code = 'ERR_HOST_NOT_FOUND';
     if (err && err.code === 'ETIMEDOUT') code = 'ERR_CONNECTION_TIMED_OUT';
 
-    sendErrorToConsole(ws, code, `Unable to connect to ${targetHost}:${targetPort}. Verify target IP and Firewall port 6129.`);
+    sendErrorToConsole(ws, code, `Hedef makineye (${targetHost}:${targetPort}) bağlanılamadı. IP adresi ve Güvenlik Duvarı 6129 portunu kontrol edin.`);
   };
 
   ws.on('message', (message) => {
@@ -212,11 +507,15 @@ wss.on('connection', (ws, req) => {
 
   ws.onclose = () => {
     isCancelled = true;
-    tcpClient.destroy();
+    try { tcpClient.destroy(); } catch (e) {}
   };
 
-  // Start initial probe
-  tryConnect();
+  // Eger kullanici zorla yeniden yukleme istemisse dogrudan deploy baslat, yoksa dogrudan baglan
+  if (forceReinstall) {
+    triggerDeployAndConnect(`Zorla yeniden kurulum ve güncelleme başlatılıyor (${targetHost})...`);
+  } else {
+    tryConnect();
+  }
 });
 
 function sendProgressToConsole(ws, message) {
@@ -241,5 +540,5 @@ function sendErrorToConsole(ws, errorCode, errorMessage) {
 }
 
 server.listen(PORT, () => {
-  console.log(`[Gateway Server] DameWare Console Gateway listening on port ${PORT}`);
+  console.log(`[Gateway Server] DameWare Console Gateway listening on port ${PORT} (Agent version: ${CURRENT_AGENT_VERSION})`);
 });

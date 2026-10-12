@@ -5,7 +5,8 @@ import {
   Settings, ChevronRight, ChevronDown, Key, Download, Upload, Trash2,
   X, Check, AlertTriangle, Send, Activity, User, HardDrive, Plus, Zap,
   Edit3, AlertCircle, Unlock, EyeOff, Copy, Globe, Layers, Sliders,
-  Radio, Maximize2, Minimize2, Filter, ArrowRight, Clock
+  Radio, Maximize2, Minimize2, Filter, ArrowRight, Clock, Moon,
+  Mic, MicOff, Volume2, Bell, Sparkles
 } from 'lucide-react';
 
 const LOCAL_STORAGE_KEY = 'dameware_saved_hosts_v1';
@@ -22,6 +23,7 @@ export default function App() {
   const [authDomain, setAuthDomain] = useState('WORKGROUP');
   const [username, setUsername] = useState('Administrator');
   const [password, setPassword] = useState('');
+  const [targetMac, setTargetMac] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
 
@@ -37,12 +39,18 @@ export default function App() {
   const [latency, setLatency] = useState(14);
   const [scaleMode, setScaleMode] = useState('fit');
   const [activeMonitor, setActiveMonitor] = useState('Primary Screen');
+  const [streamQuality, setStreamQuality] = useState(80);
+  const [targetFps, setTargetFps] = useState(30);
+  const [isVoiceActive, setIsVoiceActive] = useState(false);
 
   // Toolbar Actions State
   const [isInputLocked, setIsInputLocked] = useState(false);
   const [isScreenBlackedOut, setIsScreenBlackedOut] = useState(false);
   const [isViewOnly, setIsViewOnly] = useState(false);
   const [sendKeysOpen, setSendKeysOpen] = useState(false);
+  const [isPowerMenuOpen, setIsPowerMenuOpen] = useState(false);
+  const [openPowerCardId, setOpenPowerCardId] = useState(null);
+  const [previewModalHost, setPreviewModalHost] = useState(null);
 
   // Modals & UI helpers
   const [activeModal, setActiveModal] = useState(null);
@@ -51,9 +59,12 @@ export default function App() {
   const [searchFilter, setSearchFilter] = useState('');
   const [selectedGroup, setSelectedGroup] = useState('ALL');
 
-  // Mouse / Canvas state
+  // Mouse / Canvas / Screen state
   const isMousePressedRef = useRef(false);
   const canvasRef = useRef(null);
+  const screenImgRef = useRef(null);
+  const lastMouseMoveRef = useRef(0);
+  const [hasFrame, setHasFrame] = useState(false);
 
   // Persistent Host Directory State
   const [savedHosts, setSavedHosts] = useState(() => {
@@ -63,7 +74,7 @@ export default function App() {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed)) {
           const seenIds = new Set();
-          return parsed.map((group, gIdx) => ({
+          const groups = parsed.map((group, gIdx) => ({
             ...group,
             hosts: (group.hosts || [])
               .map((h, hIdx) => {
@@ -76,6 +87,23 @@ export default function App() {
               })
               .filter((h, index, self) => self.findIndex(t => t.id === h.id) === index)
           }));
+          const hasTargetHost = groups.some(g => (g.hosts || []).some(h => h.ip === '172.17.130.182'));
+          if (!hasTargetHost && groups.length > 0) {
+            groups[0].hosts.unshift({
+              id: 'host-hyperv-vm2',
+              name: 'DESKTOP-V1GLV4L (Hyper-V VM)',
+              ip: '172.17.130.182',
+              port: '6129',
+              domain: 'WORKGROUP',
+              user: 'Administrator',
+              pass: '',
+              status: 'ONLINE',
+              os: 'Windows 11 Pro',
+              cpu: '8%',
+              ram: '2.5 / 8.0 GB'
+            });
+          }
+          return groups;
         }
       }
     } catch (e) {}
@@ -83,6 +111,19 @@ export default function App() {
       {
         domain: 'KAYITLI SUNUCULARIM (My Saved Hosts)',
         hosts: [
+          {
+            id: 'host-hyperv-vm2',
+            name: 'DESKTOP-V1GLV4L (Hyper-V VM)',
+            ip: '172.17.130.182',
+            port: '6129',
+            domain: 'WORKGROUP',
+            user: 'Administrator',
+            pass: '',
+            status: 'ONLINE',
+            os: 'Windows 11 Pro',
+            cpu: '8%',
+            ram: '2.5 / 8.0 GB'
+          },
           {
             id: 'host-1',
             name: 'makine1 (Hyper-V VM)',
@@ -163,10 +204,145 @@ export default function App() {
   const frameCountRef = useRef(0);
   const lastFpsCalcRef = useRef(Date.now());
   const lastKeySentRef = useRef({ key: '', time: 0 });
+  const audioContextRef = useRef(null);
+  const audioStreamRef = useRef(null);
+  const processorRef = useRef(null);
+  const chatEndRef = useRef(null);
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages]);
+
+  const encodeWAV = (samples, sampleRate = 16000) => {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+    const writeString = (offset, string) => {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    };
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, 1, true); // Mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeString(36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+    return new Uint8Array(buffer);
+  };
+
+  const uint8ToBase64 = (u8) => {
+    let binary = '';
+    const len = u8.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(u8[i]);
+    }
+    return btoa(binary);
+  };
+
+  const startVoiceIntercom = async () => {
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        alert('Mikrofon kullanımı için HTTPS veya localhost bağlantısı gereklidir.');
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 16000 } });
+      audioStreamRef.current = stream;
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const audioCtx = new AudioCtx({ sampleRate: 16000 });
+      audioContextRef.current = audioCtx;
+      const source = audioCtx.createMediaStreamSource(stream);
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      processorRef.current = processor;
+
+      processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        let maxVal = 0;
+        for (let i = 0; i < inputData.length; i++) {
+          const abs = Math.abs(inputData[i]);
+          if (abs > maxVal) maxVal = abs;
+        }
+        if (maxVal < 0.02) return; // Sessizlik durumunda gereksiz paket iletme
+
+        const wavBytes = encodeWAV(inputData, 16000);
+        const b64 = uint8ToBase64(wavBytes);
+        if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+          socketRef.current.send(JSON.stringify({ type: 'AUDIO_CHUNK', data: b64 }));
+        }
+      };
+
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+      setIsVoiceActive(true);
+    } catch (err) {
+      console.error('Mikrofon erişim hatası:', err);
+      alert('Mikrofon başlatılamadı: ' + err.message);
+      setIsVoiceActive(false);
+    }
+  };
+
+  const stopVoiceIntercom = () => {
+    if (processorRef.current) {
+      try { processorRef.current.disconnect(); } catch (_) {}
+      processorRef.current = null;
+    }
+    if (audioStreamRef.current) {
+      try { audioStreamRef.current.getTracks().forEach(t => t.stop()); } catch (_) {}
+      audioStreamRef.current = null;
+    }
+    if (audioContextRef.current) {
+      try { audioContextRef.current.close(); } catch (_) {}
+      audioContextRef.current = null;
+    }
+    setIsVoiceActive(false);
+  };
+
+  const toggleVoiceIntercom = async () => {
+    if (isVoiceActive) {
+      stopVoiceIntercom();
+    } else {
+      await startVoiceIntercom();
+    }
+  };
+
+  const sendAudioBeep = () => {
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'AUDIO_BEEP' }));
+    }
+  };
+
+  const changeStreamQuality = (newQuality) => {
+    setStreamQuality(newQuality);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'SET_QUALITY', quality: newQuality }));
+    }
+  };
+
+  const changeTargetFps = (newFps) => {
+    setTargetFps(newFps);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'SET_FPS', fps: newFps }));
+    }
+  };
 
   // SINGLE ACTIVE CONNECTION ENFORCER
-  const handleConnect = (hostObj = null) => {
+  const handleConnect = (hostObj = null, options = {}) => {
     isCancelledRef.current = false;
+    const forceReinstall = Boolean(options?.forceReinstall);
+
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -184,6 +360,7 @@ export default function App() {
     let d = authDomain;
     let u = username;
     let pass = password;
+    let mac = targetMac;
 
     if (hostObj) {
       target = hostObj.ip || hostObj.name;
@@ -191,36 +368,39 @@ export default function App() {
       d = hostObj.domain || 'WORKGROUP';
       u = hostObj.user || 'Administrator';
       pass = hostObj.pass || '';
+      mac = hostObj.mac || '';
 
       setTargetHost(target);
       setTargetPort(p);
       setAuthDomain(d);
       setUsername(u);
       setPassword(pass);
+      setTargetMac(mac);
     }
 
     if (!target.trim()) return;
 
     reconnectCountRef.current = 0;
-    lastHostRef.current = hostObj || { ip: target, port: p, domain: d, user: u, pass };
+    lastHostRef.current = hostObj || { ip: target, port: p, domain: d, user: u, pass, mac };
 
     setIsConnected(false);
     setIsConnecting(true);
     setIsScreenBlackedOut(false);
     setIsInputLocked(false);
     setConnectionError(null);
-    setDeployStatus(null);
+    setDeployStatus(forceReinstall ? 'Zorla yeniden kurulum ve güncelleme başlatılıyor...' : null);
     setFrameSrc(null);
     setFrameSvg(null);
+    setHasFrame(false);
     setAgentInfo(null);
     setActiveTab('console'); // Switch to live stream viewport immediately
 
-    const wsUrl = `ws://localhost:3001/?host=${target}&port=${p}&domain=${encodeURIComponent(d)}&username=${encodeURIComponent(u)}&password=${encodeURIComponent(pass)}`;
+    const wsUrl = `ws://localhost:3001/?host=${target}&port=${p}&domain=${encodeURIComponent(d)}&username=${encodeURIComponent(u)}&password=${encodeURIComponent(pass)}${mac ? `&mac=${encodeURIComponent(mac)}` : ''}${forceReinstall ? '&force=true' : ''}`;
     const ws = new WebSocket(wsUrl);
     socketRef.current = ws;
 
     ws.onopen = () => {
-      console.log(`[RemoteMM NOC] Gateway connected for target: ${target}`);
+      console.log(`[RemoteMM NOC] Gateway connected for target: ${target} (mac: ${mac || 'auto'}, forceReinstall: ${forceReinstall})`);
     };
 
     ws.onmessage = (event) => {
@@ -240,9 +420,23 @@ export default function App() {
           setConnectionError(null);
           setIsScreenBlackedOut(false);
           setIsInputLocked(false);
+          if (data.macAddress) {
+            setTargetMac(data.macAddress.toUpperCase());
+            setSavedHosts(prev => prev.map(group => ({
+              ...group,
+              hosts: group.hosts.map(h => {
+                if (h.ip === target || h.name === target) {
+                  return { ...h, mac: data.macAddress.toUpperCase() };
+                }
+                return h;
+              })
+            })));
+          }
           if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
             socketRef.current.send(JSON.stringify({ type: 'BLACKOUT_SCREEN', blackout: false }));
             socketRef.current.send(JSON.stringify({ type: 'LOCK_INPUT', locked: false }));
+            socketRef.current.send(JSON.stringify({ type: 'SET_FPS', fps: 0 })); // 0 = Auto Max Unlocked
+            socketRef.current.send(JSON.stringify({ type: 'SET_QUALITY', quality: 88 })); // Ultra HD
           }
           setTimeout(() => { if (canvasRef.current) canvasRef.current.focus(); }, 300);
         } else if (data.type === 'SCREEN_FRAME') {
@@ -251,8 +445,10 @@ export default function App() {
           setDeployStatus(null);
           setConnectionError(null);
           if (data.frame) {
-            setFrameSrc(`data:image/jpeg;base64,${data.frame}`);
-            setFrameSvg(null);
+            if (screenImgRef.current) {
+              screenImgRef.current.src = `data:image/jpeg;base64,${data.frame}`;
+            }
+            if (!hasFrame) setHasFrame(true);
             frameCountRef.current++;
             const now = Date.now();
             if (now - lastFpsCalcRef.current >= 1000) {
@@ -359,9 +555,11 @@ export default function App() {
     setIsConnecting(false);
     setIsScreenBlackedOut(false);
     setIsInputLocked(false);
+    stopVoiceIntercom();
     setAgentInfo(null);
     setFrameSrc(null);
     setFrameSvg(null);
+    setHasFrame(false);
   };
 
   // Ping interval to keep latency indicator updated
@@ -446,7 +644,12 @@ export default function App() {
   useEffect(() => {
     if (!isConnected || activeTab !== 'console') return;
     const onGlobalKeyDown = (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
+      if (
+        e.target.tagName === 'INPUT' ||
+        e.target.tagName === 'TEXTAREA' ||
+        e.target.isContentEditable ||
+        (e.target.closest && e.target.closest('[data-chat-panel]'))
+      ) return;
       handleKeyDown(e);
     };
     window.addEventListener('keydown', onGlobalKeyDown);
@@ -485,37 +688,117 @@ export default function App() {
     }
   };
 
+  const triggerWakeOnLan = async (hostOrMac, hostIp = '') => {
+    let mac = '';
+    let ip = '';
+    if (typeof hostOrMac === 'object' && hostOrMac !== null) {
+      mac = hostOrMac.mac || '';
+      ip = hostOrMac.ip || '';
+    } else if (typeof hostOrMac === 'string') {
+      mac = hostOrMac;
+      ip = hostIp;
+    }
+    try {
+      const res = await fetch('http://localhost:3001/api/power/wol', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mac, ip })
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(`⚡ Wake-on-LAN sihirli paketi (${data.mac}) gönderildi! Bilgisayar uyanıyor...`);
+      } else {
+        alert(`❌ WoL Hatası: ${data.error}`);
+      }
+    } catch (e) {
+      alert(`WoL isteği başarısız: ${e.message}`);
+    }
+    setIsPowerMenuOpen(false);
+  };
+
   const sendPowerAction = (actionType) => {
-    if (confirm(`Uzak sunucuda [${actionType.toUpperCase()}] işlemini onaylıyor musunuz?`)) {
+    const actionLabels = {
+      shutdown: 'Bilgisayarı Kapat',
+      reboot: 'Yeniden Başlat',
+      sleep: 'Uyku Modu',
+      hibernate: 'Hazırda Beklet',
+      lock: 'Oturumu Kilitle',
+      logoff: 'Oturumu Kapat',
+      abort: 'Kapatmayı İptal Et'
+    };
+    const label = actionLabels[actionType] || actionType.toUpperCase();
+    if (confirm(`Uzak makinede [${label}] işlemini onaylıyor musunuz?`)) {
       if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
         socketRef.current.send(JSON.stringify({
           type: 'POWER_ACTION',
           action: actionType
         }));
       }
+      setIsPowerMenuOpen(false);
       setActiveModal(null);
     }
   };
 
+  const handleRemotePowerAction = async (h, actionType) => {
+    const actionLabels = {
+      shutdown: 'Bilgisayarı Kapat',
+      reboot: 'Yeniden Başlat',
+      sleep: 'Uyku Modu',
+      hibernate: 'Hazırda Beklet',
+      lock: 'Oturumu Kilitle',
+      logoff: 'Oturumu Kapat',
+      abort: 'Kapatmayı İptal Et'
+    };
+    const label = actionLabels[actionType] || actionType.toUpperCase();
+    if (!confirm(`"${h.name}" (${h.ip}) üzerinde [${label}] işlemini uygulamak istiyor musunuz?`)) {
+      return;
+    }
+
+    try {
+      const res = await fetch('http://localhost:3001/api/power/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetHost: h.ip || h.name,
+          port: h.port || '6129',
+          action: actionType
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(`⚡ [${label}] komutu başarıyla iletildi! (${data.method || 'işlem uygulandı'})`);
+        setTimeout(() => pollFleetStatus(), 2000);
+      } else {
+        alert(`❌ İşlem hatası: ${data.error || data.err || 'Uzak makine yanıt vermedi'}`);
+      }
+    } catch (e) {
+      alert(`İstek başarısız: ${e.message}`);
+    }
+    setOpenPowerCardId(null);
+  };
+
   const handleSendChat = (e) => {
     e.preventDefault();
-    if (!chatInput.trim()) return;
+    const textToSend = chatInput.trim();
+    if (!textToSend) return;
 
     const newMessage = {
       sender: 'Technician (You)',
-      text: chatInput,
+      text: textToSend,
       time: new Date().toLocaleTimeString()
     };
 
     setChatMessages(prev => [...prev, newMessage]);
+    setChatInput('');
 
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({
         type: 'CHAT_MESSAGE',
-        text: chatInput
+        text: textToSend
       }));
+    } else {
+      alert('⚠️ Canlı bağlantı aktif değil. Karşı makineye mesaj iletmek için lütfen Canlı Konsol üzerinden bir istemciye bağlanın.');
     }
-    setChatInput('');
   };
 
   const handleKillProcess = (processId) => {
@@ -607,6 +890,9 @@ export default function App() {
   };
 
   const handleMouseMove = (e) => {
+    const now = performance.now();
+    if (now - lastMouseMoveRef.current < 16) return;
+    lastMouseMoveRef.current = now;
     sendMouseInput('move', e);
   };
 
@@ -705,6 +991,101 @@ export default function App() {
     const matchesGroup = selectedGroup === 'ALL' || h.domain === selectedGroup;
     return matchesSearch && matchesGroup;
   });
+
+  // Fleet Live Monitoring & Snapshots State
+  const [hostStatuses, setHostStatuses] = useState({});
+  const [hostSnapshots, setHostSnapshots] = useState({});
+  const [isLivePreviewEnabled, setIsLivePreviewEnabled] = useState(true);
+  const [isPollingFleet, setIsPollingFleet] = useState(false);
+
+  const onlineCount = allHosts.filter(h => hostStatuses[h.id]?.online).length;
+  const offlineCount = allHosts.length - onlineCount;
+
+  const pollFleetStatus = async (hostsToPoll = allHosts, fetchSnaps = isLivePreviewEnabled) => {
+    if (!hostsToPoll || hostsToPoll.length === 0) return;
+    setIsPollingFleet(true);
+    try {
+      const res = await fetch('http://localhost:3001/api/fleet/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hosts: hostsToPoll.map(h => ({
+            id: h.id,
+            ip: h.ip || h.name,
+            port: h.port || '6129'
+          }))
+        })
+      });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => null);
+      if (!data) return;
+
+      const statusMap = data.statuses || data.results;
+      if (statusMap) {
+        setHostStatuses(prev => {
+          const next = { ...prev };
+          Object.keys(statusMap).forEach(key => {
+            const item = statusMap[key];
+            next[key] = {
+              online: item.online,
+              latency: item.latency,
+              lastChecked: Date.now()
+            };
+          });
+          return next;
+        });
+
+        if (fetchSnaps) {
+          const onlineKeys = Object.keys(statusMap).filter(k => statusMap[k]?.online);
+          await Promise.allSettled(
+            onlineKeys.map(async (key) => {
+              const h = hostsToPoll.find(x => x.id === key || x.ip === key);
+              if (!h) return;
+              const hostTarget = h.ip || h.name;
+              const portTarget = h.port || '6129';
+              try {
+                const snapRes = await fetch(`http://localhost:3001/api/fleet/snapshot?host=${encodeURIComponent(hostTarget)}&port=${encodeURIComponent(portTarget)}&fresh=true`);
+                if (!snapRes.ok) return;
+                const snapData = await snapRes.json().catch(() => null);
+                const rawFrame = snapData?.frame || snapData?.snapshot;
+                if (snapData && snapData.success && rawFrame) {
+                  const dataUri = rawFrame.startsWith('data:') ? rawFrame : `data:image/jpeg;base64,${rawFrame}`;
+                  setHostSnapshots(prev => ({
+                    ...prev,
+                    [h.id]: {
+                      snapshot: dataUri,
+                      user: snapData.user,
+                      width: snapData.width,
+                      height: snapData.height,
+                      timestamp: Date.now()
+                    }
+                  }));
+                }
+              } catch (err) {
+                // Ignore transient snapshot failures
+              }
+            })
+          );
+        }
+      }
+    } catch (e) {
+      // Ignore background poll errors silently
+    } finally {
+      setIsPollingFleet(false);
+    }
+  };
+
+  // Auto-poll fleet online status & screen previews when viewing Fleet tab (Every 3 seconds for live surveillance)
+  useEffect(() => {
+    if (activeTab !== 'fleet') return;
+    pollFleetStatus(allHosts, isLivePreviewEnabled);
+
+    const interval = setInterval(() => {
+      pollFleetStatus(allHosts, isLivePreviewEnabled);
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [activeTab, allHosts, isLivePreviewEnabled]);
 
   const requestFsList = (path) => {
     if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
@@ -891,7 +1272,7 @@ export default function App() {
             }}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
               activeTab === 'chat'
-                ? 'bg-gradient-to-r from-cyan-500/20 to-sky-500/20 text-cyan-300 border border-cyan-500/30'
+                ? 'bg-gradient-to-r from-cyan-500/20 to-sky-500/20 text-cyan-300 border border-cyan-500/30 shadow-[0_0_12px_rgba(56,189,248,0.15)]'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
             }`}
           >
@@ -986,24 +1367,33 @@ export default function App() {
             
             {/* FLOATING HUD / LIVE CONTROL BAR (ONLY WHEN CONNECTED) */}
             {isConnected && (
-              <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-xl border border-slate-700/80 shadow-2xl">
+              <div className="absolute top-2.5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 bg-slate-900/95 backdrop-blur-xl px-2.5 py-1.5 rounded-2xl border border-slate-700/80 shadow-[0_8px_32px_rgba(0,0,0,0.6)]">
                 
-                {/* UAC APPROVE PROMINENT BUTTON */}
+                {/* UAC APPROVE BUTTON */}
                 <button
                   onClick={() => sendSpecialKey('UAC_YES')}
-                  className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-[0_0_15px_rgba(16,185,129,0.4)] transition animate-pulse"
+                  className="px-2.5 py-1 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 shadow-[0_0_12px_rgba(16,185,129,0.35)] transition"
                   title="UAC Yönetici İznini Onayla (Evet / Yes)"
                 >
-                  <Check className="w-3.5 h-3.5 stroke-[3]" /> UAC Onayla (Evet)
+                  <Check className="w-3.5 h-3.5 stroke-[3]" /> UAC (Evet)
+                </button>
+
+                {/* DISMISS LOCK / UNLOCK BUTTON */}
+                <button
+                  onClick={() => sendSpecialKey('UNLOCK')}
+                  className="px-2.5 py-1 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-bold flex items-center gap-1 shadow-[0_0_12px_rgba(245,158,11,0.35)] transition"
+                  title="Kilit Ekranını Aç / Geç (Enter & CAD)"
+                >
+                  <Unlock className="w-3.5 h-3.5 stroke-[2.5]" /> Kilidi Aç
                 </button>
 
                 {/* SPECIAL KEYS DROPDOWN */}
                 <div className="relative">
                   <button
                     onClick={() => setSendKeysOpen(!sendKeysOpen)}
-                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs flex items-center gap-1.5 border border-slate-700 font-semibold text-amber-400 hover:border-amber-500/50 transition"
+                    className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-[11px] flex items-center gap-1 border border-slate-700 font-semibold text-slate-200 hover:border-slate-600 transition"
                   >
-                    <Key className="w-3.5 h-3.5 text-amber-400" /> Tuş Gönder <ChevronDown className="w-3 h-3 text-slate-400" />
+                    <Key className="w-3.5 h-3.5 text-amber-400" /> Tuşlar <ChevronDown className="w-3 h-3 text-slate-400" />
                   </button>
                   {sendKeysOpen && (
                     <div className="absolute left-0 top-full mt-2 flex flex-col bg-slate-950 border border-slate-800 rounded-xl shadow-2xl py-1.5 z-50 min-w-[240px] backdrop-blur-lg">
@@ -1038,43 +1428,118 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="h-4 w-px bg-slate-800"></div>
+                {/* POWER MANAGEMENT DROPDOWN */}
+                <div className="relative">
+                  <button
+                    onClick={() => setIsPowerMenuOpen(!isPowerMenuOpen)}
+                    className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-rose-400 transition"
+                    title="Uzaktan Güç Menüsü (Kapat, Yeniden Başlat, Uyku, Uyandır)"
+                  >
+                    <Power className="w-3.5 h-3.5" />
+                  </button>
 
-                {/* INPUT LOCK TOGGLE */}
+                  {isPowerMenuOpen && (
+                    <div className="absolute top-full right-0 mt-2 w-56 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-1.5 z-50 flex flex-col gap-1 text-xs backdrop-blur-md">
+                      <div className="px-2.5 py-1 text-[10px] font-mono text-slate-400 uppercase tracking-wider border-b border-slate-800">
+                        Uzaktan Güç Menüsü
+                      </div>
+
+                      <button
+                        onClick={() => triggerWakeOnLan(targetMac, targetHost)}
+                        className="px-2.5 py-2 rounded-lg hover:bg-cyan-500/10 text-cyan-400 font-semibold flex items-center gap-2 transition text-left"
+                      >
+                        <Zap className="w-3.5 h-3.5" />
+                        <span>PC'yi Aç / Uyandır (WoL)</span>
+                      </button>
+
+                      <button
+                        onClick={() => sendPowerAction('lock')}
+                        className="px-2.5 py-2 rounded-lg hover:bg-slate-800 text-slate-200 flex items-center gap-2 transition text-left"
+                      >
+                        <Lock className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Oturumu Kilitle</span>
+                      </button>
+
+                      <button
+                        onClick={() => sendPowerAction('sleep')}
+                        className="px-2.5 py-2 rounded-lg hover:bg-slate-800 text-slate-200 flex items-center gap-2 transition text-left"
+                      >
+                        <Moon className="w-3.5 h-3.5 text-indigo-400" />
+                        <span>Uyku Modu (Sleep)</span>
+                      </button>
+
+                      <button
+                        onClick={() => sendPowerAction('reboot')}
+                        className="px-2.5 py-2 rounded-lg hover:bg-amber-500/10 text-amber-300 font-semibold flex items-center gap-2 transition text-left"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Yeniden Başlat (Restart)</span>
+                      </button>
+
+                      <button
+                        onClick={() => sendPowerAction('shutdown')}
+                        className="px-2.5 py-2 rounded-lg hover:bg-rose-500/10 text-rose-400 font-bold flex items-center gap-2 transition text-left"
+                      >
+                        <Power className="w-3.5 h-3.5" />
+                        <span>Bilgisayarı Kapat (Shutdown)</span>
+                      </button>
+
+                      <button
+                        onClick={() => sendPowerAction('abort')}
+                        className="px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-slate-400 text-[11px] flex items-center gap-2 transition text-left border-t border-slate-800/80 mt-1"
+                      >
+                        <X className="w-3 h-3" />
+                        <span>Kapatmayı İptal Et</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="h-4 w-px bg-slate-800 mx-0.5"></div>
+
+                {/* AUDIO / VOICE INTERCOM & CHIME */}
                 <button
-                  onClick={toggleLockInput}
-                  className={`p-1.5 rounded-lg border text-xs flex items-center gap-1 transition ${
-                    isInputLocked
-                      ? 'bg-amber-500/20 text-amber-400 border-amber-500/50 shadow-[0_0_10px_rgba(245,158,11,0.2)]'
-                      : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                  onClick={toggleVoiceIntercom}
+                  className={`px-2.5 py-1 rounded-xl border text-[11px] font-bold flex items-center gap-1 transition ${
+                    isVoiceActive
+                      ? 'bg-rose-500/20 text-rose-400 border-rose-500/50 shadow-[0_0_12px_rgba(244,63,94,0.3)] animate-pulse'
+                      : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700 hover:text-white'
                   }`}
-                  title={isInputLocked ? 'Karşı Kullanıcı Girişini Aç' : 'Karşı Kullanıcı Fiziksel Klavye/Fareyi Kilitle'}
+                  title={isVoiceActive ? 'Canlı Ses İletimini Kapat' : 'Canlı Ses / Telsiz Aç (Mikrofon ile Karşıya Konuş)'}
                 >
-                  {isInputLocked ? <Unlock className="w-3.5 h-3.5 text-amber-400" /> : <Lock className="w-3.5 h-3.5" />}
+                  {isVoiceActive ? <Mic className="w-3.5 h-3.5 text-rose-400 animate-bounce" /> : <MicOff className="w-3.5 h-3.5 text-slate-400" />}
+                  <span>{isVoiceActive ? 'Ses Açık' : 'Konuş'}</span>
                 </button>
 
-                {/* BLACKOUT SCREEN TOGGLE */}
                 <button
-                  onClick={toggleBlackoutScreen}
-                  className={`p-1.5 rounded-lg border text-xs flex items-center gap-1 transition ${
-                    isScreenBlackedOut
-                      ? 'bg-rose-500/20 text-rose-400 border-rose-500/50 shadow-[0_0_10px_rgba(244,63,94,0.2)]'
-                      : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
-                  }`}
-                  title={isScreenBlackedOut ? 'Karşı Ekran Görüntüsünü Geri Getir' : 'Karşı Ekranı Karart (Siyah Ekran Modu)'}
+                  onClick={sendAudioBeep}
+                  className="p-1.5 rounded-xl bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700 hover:text-amber-400 transition"
+                  title="Karşı Bilgisayarda Dikkat Zili Çal (Windows Chime)"
                 >
-                  {isScreenBlackedOut ? <EyeOff className="w-3.5 h-3.5 text-rose-400" /> : <Eye className="w-3.5 h-3.5 text-slate-300" />}
+                  <Bell className="w-3.5 h-3.5" />
                 </button>
 
-                <div className="h-4 w-px bg-slate-800"></div>
+                <div className="h-4 w-px bg-slate-800 mx-0.5"></div>
 
-                {/* DISPLAY SCALING */}
-                <div className="flex bg-slate-950 p-0.5 rounded-lg border border-slate-800">
-                  {['fit', '100%', 'stretch'].map(mode => (
+                {/* AUTO MAX FPS & ULTRA HD LIVE STATUS BADGE */}
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-950 border border-emerald-500/30 text-[10px] font-mono shadow-[0_0_10px_rgba(16,185,129,0.1)]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 pulse-dot"></span>
+                  <span className="text-emerald-400 font-bold">{fps} FPS</span>
+                  <span className="text-slate-600">•</span>
+                  <span className="text-cyan-400 font-semibold">{latency}ms</span>
+                  <span className="text-slate-600">•</span>
+                  <span className="text-indigo-400 font-bold">OTO MAX (HD)</span>
+                </div>
+
+                <div className="h-4 w-px bg-slate-800 mx-0.5"></div>
+
+                {/* DISPLAY SCALING (FIT / 100%) */}
+                <div className="flex bg-slate-950 p-0.5 rounded-xl border border-slate-800">
+                  {['fit', '100%'].map(mode => (
                     <button
                       key={mode}
                       onClick={() => setScaleMode(mode)}
-                      className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase transition ${
+                      className={`px-2 py-0.5 rounded-lg text-[10px] font-mono uppercase transition ${
                         scaleMode === mode ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-slate-200'
                       }`}
                     >
@@ -1086,32 +1551,85 @@ export default function App() {
                 {/* VIEW ONLY / CONTROL MODE */}
                 <button
                   onClick={() => setIsViewOnly(!isViewOnly)}
-                  className={`px-2 py-1 rounded-lg border text-[10px] font-mono uppercase font-bold transition ${
+                  className={`px-2 py-1 rounded-xl border text-[10px] font-mono font-bold transition ${
                     isViewOnly
                       ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
                       : 'bg-slate-950 text-cyan-400 border-slate-800 hover:border-slate-700'
                   }`}
                 >
-                  {isViewOnly ? 'Sadece İzle' : 'Tam Kontrol'}
+                  {isViewOnly ? 'İzle' : 'Kontrol'}
                 </button>
 
-                {/* SIDEBAR DRAWER TOGGLE */}
+                {/* INPUT LOCK TOGGLE */}
+                <button
+                  onClick={toggleLockInput}
+                  className={`p-1.5 rounded-xl border text-xs transition ${
+                    isInputLocked
+                      ? 'bg-amber-500/20 text-amber-400 border-amber-500/50 shadow-[0_0_10px_rgba(245,158,11,0.2)]'
+                      : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'
+                  }`}
+                  title={isInputLocked ? 'Karşı Kullanıcı Girişini Aç' : 'Karşı Fiziksel Klavye/Fareyi Kilitle'}
+                >
+                  {isInputLocked ? <Unlock className="w-3.5 h-3.5 text-amber-400" /> : <Lock className="w-3.5 h-3.5" />}
+                </button>
+
+                {/* BLACKOUT SCREEN TOGGLE */}
+                <button
+                  onClick={toggleBlackoutScreen}
+                  className={`p-1.5 rounded-xl border text-xs transition ${
+                    isScreenBlackedOut
+                      ? 'bg-rose-500/20 text-rose-400 border-rose-500/50 shadow-[0_0_10px_rgba(244,63,94,0.2)]'
+                      : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'
+                  }`}
+                  title={isScreenBlackedOut ? 'Karşı Ekran Görüntüsünü Geri Getir' : 'Karşı Ekranı Karart'}
+                >
+                  {isScreenBlackedOut ? <EyeOff className="w-3.5 h-3.5 text-rose-400" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+
+                {/* LIVE CHAT OVERLAY TOGGLE */}
                 <button
                   onClick={() => {
-                    const next = !isConsoleDrawerOpen;
+                    const next = !(isConsoleDrawerOpen && consoleDrawerTab === 'chat');
                     setIsConsoleDrawerOpen(next);
-                    if (next && consoleDrawerTab === 'chat' && socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+                    setConsoleDrawerTab('chat');
+                    if (next && socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
                       socketRef.current.send(JSON.stringify({ type: 'CHAT_OPEN' }));
                     }
                   }}
-                  className={`p-1.5 rounded-lg border text-xs transition ${
-                    isConsoleDrawerOpen
+                  className={`px-2.5 py-1 rounded-xl text-[11px] font-bold flex items-center gap-1.5 transition ${
+                    isConsoleDrawerOpen && consoleDrawerTab === 'chat'
+                      ? 'bg-cyan-500 text-slate-950 shadow-[0_0_12px_rgba(6,182,212,0.5)]'
+                      : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700 hover:text-cyan-400'
+                  }`}
+                  title="Karşı Tarafla Canlı Sohbet Penceresini Aç"
+                >
+                  <MessageSquare className="w-3.5 h-3.5" /> Sohbet
+                </button>
+
+                {/* SIDEBAR DRAWER TOGGLE (SÜREÇLER) */}
+                <button
+                  onClick={() => {
+                    const next = !(isConsoleDrawerOpen && consoleDrawerTab === 'processes');
+                    setIsConsoleDrawerOpen(next);
+                    setConsoleDrawerTab('processes');
+                  }}
+                  className={`p-1.5 rounded-xl border text-xs transition ${
+                    isConsoleDrawerOpen && consoleDrawerTab === 'processes'
                       ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/40'
                       : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'
                   }`}
-                  title="Operasyon Paneli (Sohbet / Görevler)"
+                  title="Operasyon Paneli (Süreçler / Görev Yöneticisi)"
                 >
                   <Sliders className="w-3.5 h-3.5" />
+                </button>
+
+                {/* DISCONNECT BUTTON */}
+                <button
+                  onClick={handleDisconnect}
+                  className="p-1.5 rounded-xl bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 transition"
+                  title="Bağlantıyı Kapat"
+                >
+                  <X className="w-3.5 h-3.5" />
                 </button>
               </div>
             )}
@@ -1130,22 +1648,37 @@ export default function App() {
                   onWheel={(e) => { e.preventDefault(); sendScrollInput(e); }}
                   onContextMenu={(e) => { e.preventDefault(); sendMouseInput('click', e); }}
                 >
-                  {frameSrc ? (
-                    <img
-                      src={frameSrc}
-                      alt="Remote Console Stream"
-                      className={`w-full h-full pointer-events-none ${
-                        scaleMode === 'fit'
-                          ? 'object-contain'
-                          : scaleMode === 'stretch'
-                          ? 'object-fill'
-                          : 'object-none'
-                      }`}
-                    />
-                  ) : (
-                    <div className="flex flex-col items-center justify-center text-slate-500 gap-3">
-                      <RefreshCw className="w-8 h-8 animate-spin text-cyan-400" />
-                      <span className="text-xs font-mono text-cyan-300 tracking-wider">YÜKSEK ÇÖZÜNÜRLÜKLÜ AKIŞ BAŞLATILIYOR...</span>
+                  <img
+                    ref={screenImgRef}
+                    alt="Remote Console Stream"
+                    className={`w-full h-full pointer-events-none select-none ${
+                      !hasFrame ? 'opacity-0' : 'opacity-100'
+                    } ${
+                      scaleMode === 'fit'
+                        ? 'object-contain'
+                        : scaleMode === 'stretch'
+                        ? 'object-fill'
+                        : 'object-none'
+                    }`}
+                    style={{
+                      imageRendering: 'auto',
+                      transform: 'translateZ(0)',
+                      backfaceVisibility: 'hidden'
+                    }}
+                  />
+                  {!hasFrame && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 gap-3 p-6 text-center max-w-md">
+                      <RefreshCw className="w-9 h-9 animate-spin text-cyan-400" />
+                      <span className="text-sm font-bold text-slate-100 tracking-wide">
+                        {deployStatus ? 'Otomatik Kurulum / Güncelleme Devam Ediyor' : 'Bağlantı Kuruluyor...'}
+                      </span>
+                      {deployStatus ? (
+                        <div className="text-xs font-mono text-cyan-300 bg-cyan-950/70 border border-cyan-500/40 px-4 py-2.5 rounded-xl shadow-lg w-full animate-pulse">
+                          {deployStatus}
+                        </div>
+                      ) : (
+                        <span className="text-xs font-mono text-cyan-300 tracking-wider">YÜKSEK ÇÖZÜNÜRLÜKLÜ AKIŞ BAŞLATILIYOR...</span>
+                      )}
                     </div>
                   )}
 
@@ -1189,12 +1722,21 @@ export default function App() {
                     <div>2. Güvenlik Duvarı <strong className="text-amber-400">6129</strong> portuna izin veriyor mu?</div>
                     <div>3. IP Adresi (<strong className="text-emerald-400">{targetHost}</strong>) doğru mu?</div>
                   </div>
-                  <button
-                    onClick={() => handleConnect()}
-                    className="mt-5 px-5 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-rose-600/30 transition"
-                  >
-                    <RefreshCw className="w-4 h-4" /> Yeniden Bağlanmayı Dene
-                  </button>
+                  <div className="flex items-center gap-3 mt-5 w-full">
+                    <button
+                      onClick={() => handleConnect()}
+                      className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-lg shadow-rose-600/30 transition"
+                    >
+                      <RefreshCw className="w-4 h-4" /> Yeniden Dene
+                    </button>
+                    <button
+                      onClick={() => handleConnect(null, { forceReinstall: true })}
+                      className="flex-1 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-lg shadow-cyan-600/30 transition"
+                      title="Silinmiş veya bozuk agent'ı temizleyip sıfırdan kurar ve bağlar"
+                    >
+                      <Download className="w-4 h-4" /> Sıfırdan Kur & Bağlan
+                    </button>
+                  </div>
                 </div>
               ) : (
                 /* DISCONNECTED LAUNCHER VIEW */
@@ -1271,7 +1813,7 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="pt-5">
+                      <div className="pt-5 space-y-2">
                         <button
                           disabled={isConnecting || !targetHost.trim()}
                           onClick={() => handleConnect()}
@@ -1282,6 +1824,15 @@ export default function App() {
                           ) : (
                             <><Play className="w-4 h-4 fill-current" /> Konsolu Başlat (Canlı Bağlan)</>
                           )}
+                        </button>
+                        <button
+                          disabled={isConnecting || !targetHost.trim()}
+                          onClick={() => handleConnect(null, { forceReinstall: true })}
+                          className="w-full py-2.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800/80 font-semibold text-[11px] flex items-center justify-center gap-2 transition disabled:opacity-50"
+                          title="Silinmiş veya eski sürüm agent durumunda sıfırdan kurup başlatır"
+                        >
+                          <Download className="w-3.5 h-3.5 text-cyan-400" />
+                          <span>Zorla Yeniden Yükle / Güncelle & Bağlan</span>
                         </button>
                       </div>
                     </div>
@@ -1349,11 +1900,17 @@ export default function App() {
               )}
             </div>
 
-            {/* SLIDE-OVER CONSOLE DRAWER (CHAT & PROCESSES DURING LIVE STREAM) */}
+            {/* FLOATING OVERLAY PANEL (CHAT & PROCESSES DURING LIVE STREAM - ZERO CANVAS SHRINK) */}
             {isConnected && isConsoleDrawerOpen && (
-              <aside className="w-80 border-l border-slate-800 bg-slate-950/95 backdrop-blur-md flex flex-col z-30 animate-in slide-in-from-right duration-200">
-                <div className="h-10 px-3 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between text-xs font-semibold">
-                  <div className="flex gap-2">
+              <div
+                data-chat-panel="true"
+                onMouseDown={(e) => e.stopPropagation()}
+                onMouseUp={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                className="absolute right-6 bottom-6 w-96 h-[500px] max-h-[80vh] bg-slate-950/95 backdrop-blur-2xl border border-cyan-500/30 rounded-2xl shadow-[0_25px_60px_rgba(0,0,0,0.85)] flex flex-col z-50 overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-200"
+              >
+                <div className="h-11 px-3.5 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between text-xs font-semibold select-none">
+                  <div className="flex items-center gap-1.5">
                     <button
                       onClick={() => {
                         setConsoleDrawerTab('chat');
@@ -1361,60 +1918,93 @@ export default function App() {
                           socketRef.current.send(JSON.stringify({ type: 'CHAT_OPEN' }));
                         }
                       }}
-                      className={`px-2 py-1 rounded ${consoleDrawerTab === 'chat' ? 'bg-cyan-500/20 text-cyan-400' : 'text-slate-400'}`}
+                      className={`px-3 py-1 rounded-lg font-bold flex items-center gap-1.5 transition ${
+                        consoleDrawerTab === 'chat'
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
                     >
-                      Sohbet
+                      <MessageSquare className="w-3.5 h-3.5" /> Sohbet
                     </button>
                     <button
                       onClick={() => setConsoleDrawerTab('processes')}
-                      className={`px-2 py-1 rounded ${consoleDrawerTab === 'processes' ? 'bg-cyan-500/20 text-cyan-400' : 'text-slate-400'}`}
+                      className={`px-3 py-1 rounded-lg font-bold flex items-center gap-1.5 transition ${
+                        consoleDrawerTab === 'processes'
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
                     >
-                      Süreçler
+                      <Cpu className="w-3.5 h-3.5" /> Süreçler
                     </button>
                   </div>
-                  <button onClick={() => setIsConsoleDrawerOpen(false)} className="text-slate-400 hover:text-white">
-                    <X className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 pulse-dot" title="Canlı İletişim Aktif"></span>
+                    <button
+                      onClick={() => setIsConsoleDrawerOpen(false)}
+                      className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                      title="Kapat"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
 
                 {consoleDrawerTab === 'chat' ? (
-                  <div className="flex-1 flex flex-col p-3 text-xs overflow-hidden">
-                    <div className="flex-1 overflow-y-auto space-y-2 pr-1 mb-2">
-                      {chatMessages.map((msg, i) => (
-                        <div key={i} className="p-2 rounded-lg bg-slate-900 border border-slate-800">
-                          <div className="flex justify-between text-[10px] text-slate-500 font-mono mb-1">
-                            <span>{msg.sender}</span>
-                            <span>{msg.time}</span>
+                  <div className="flex-1 flex flex-col p-3 text-xs overflow-hidden bg-slate-950/50">
+                    <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 mb-2">
+                      {chatMessages.map((msg, i) => {
+                        const isTech = msg.sender.includes('You') || msg.sender.includes('Technician') || msg.sender.includes('Teknisyen');
+                        const isSys = msg.sender.includes('System') || msg.sender.includes('Sistem');
+                        return (
+                          <div
+                            key={i}
+                            className={`p-2.5 rounded-xl border max-w-[88%] text-xs shadow-sm ${
+                              isTech
+                                ? 'ml-auto bg-gradient-to-r from-cyan-950/80 to-sky-950/80 border-cyan-500/40 text-cyan-100 rounded-tr-none'
+                                : isSys
+                                ? 'mx-auto bg-slate-900/60 border-slate-800/80 text-slate-400 text-[11px] text-center w-full'
+                                : 'mr-auto bg-emerald-950/70 border-emerald-500/40 text-emerald-100 rounded-tl-none'
+                            }`}
+                          >
+                            <div className="flex justify-between items-center text-[10px] opacity-75 font-mono mb-1 gap-3">
+                              <span className="font-bold">{msg.sender}</span>
+                              <span className="text-slate-400 text-[9px]">{msg.time}</span>
+                            </div>
+                            <div className="text-slate-100 font-sans leading-relaxed break-words">{msg.text}</div>
                           </div>
-                          <div className="text-slate-200">{msg.text}</div>
-                        </div>
-                      ))}
+                        );
+                      })}
+                      <div ref={chatEndRef} />
                     </div>
-                    <form onSubmit={handleSendChat} className="flex gap-1.5">
+                    <form onSubmit={handleSendChat} className="flex gap-2 pt-1 border-t border-slate-800/80">
                       <input
                         type="text"
                         value={chatInput}
                         onChange={(e) => setChatInput(e.target.value)}
-                        placeholder="Karşı tarafa mesaj ilet..."
-                        className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 outline-none text-slate-200"
+                        placeholder="Karşı kullanıcıya mesaj ilet..."
+                        className="flex-1 bg-slate-900/90 border border-slate-800 rounded-xl px-3 py-2 outline-none text-slate-100 text-xs focus:border-cyan-500 transition"
                       />
-                      <button type="submit" className="p-2 rounded-lg bg-cyan-600 text-white">
+                      <button
+                        type="submit"
+                        className="px-3.5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold flex items-center justify-center transition shadow-lg shadow-cyan-600/30"
+                        title="Gönder"
+                      >
                         <Send className="w-3.5 h-3.5" />
                       </button>
                     </form>
                   </div>
                 ) : (
-                  <div className="flex-1 p-3 text-xs overflow-y-auto space-y-2">
-                    <div className="text-[11px] font-bold text-slate-400 uppercase">Aktif Süreçler</div>
+                  <div className="flex-1 p-3 text-xs overflow-y-auto space-y-2 bg-slate-950/50">
+                    <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Aktif Süreçler</div>
                     {processes.map(p => (
-                      <div key={p.Id} className="p-2 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between">
+                      <div key={p.Id} className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800/80 flex items-center justify-between hover:border-slate-700 transition">
                         <div>
                           <div className="font-bold text-slate-200">{p.ProcessName}</div>
-                          <div className="text-[10px] text-slate-500 font-mono">PID: {p.Id} • {p.CPU}</div>
+                          <div className="text-[10px] text-slate-400 font-mono">PID: {p.Id} • {p.CPU}</div>
                         </div>
                         <button
                           onClick={() => handleKillProcess(p.Id)}
-                          className="px-2 py-1 rounded bg-rose-500/20 text-rose-400 hover:bg-rose-500/30 text-[10px]"
+                          className="px-2.5 py-1 rounded-lg bg-rose-500/20 text-rose-400 hover:bg-rose-500/30 text-[10px] font-semibold transition"
                         >
                           Sonlandır
                         </button>
@@ -1422,7 +2012,7 @@ export default function App() {
                     ))}
                   </div>
                 )}
-              </aside>
+              </div>
             )}
 
           </div>
@@ -1442,8 +2032,8 @@ export default function App() {
                   <Server className="w-4 h-4 text-cyan-400" />
                 </div>
                 <div className="text-2xl font-black font-mono text-slate-100 mt-2">{allHosts.length}</div>
-                <div className="text-[10px] text-emerald-400 mt-1 font-mono flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> Tüm düğümler erişilebilir
+                <div className="text-[10px] text-cyan-400 mt-1 font-mono flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span> Toplam Envanter Düğümü
                 </div>
               </div>
 
@@ -1452,17 +2042,26 @@ export default function App() {
                   <span className="text-xs font-semibold text-slate-400">Canlı Sistem Durumu</span>
                   <Activity className="w-4 h-4 text-emerald-400" />
                 </div>
-                <div className="text-2xl font-black font-mono text-emerald-400 mt-2">100% ONLINE</div>
-                <div className="text-[10px] text-slate-400 mt-1 font-mono">Port 6129 Dinlemede</div>
+                <div className="text-2xl font-black font-mono text-emerald-400 mt-2">
+                  {allHosts.length > 0 ? `${onlineCount} / ${allHosts.length} ONLINE` : '0 ONLINE'}
+                </div>
+                <div className="text-[10px] text-emerald-400 mt-1 font-mono flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 pulse-dot"></span>
+                  {offlineCount > 0 ? `${offlineCount} düğüm kapalı / uyku modunda` : 'Tüm düğümler aktif ve erişilebilir'}
+                </div>
               </div>
 
               <div className="glass-card rounded-2xl p-4 border-indigo-500/20">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-400">Ajan İzolasyon Seviyesi</span>
-                  <Shield className="w-4 h-4 text-indigo-400" />
+                  <span className="text-xs font-semibold text-slate-400">Canlı Önizleme Modu</span>
+                  <Eye className="w-4 h-4 text-indigo-400" />
                 </div>
-                <div className="text-2xl font-black font-mono text-indigo-300 mt-2">SYSTEM 0</div>
-                <div className="text-[10px] text-indigo-400 mt-1 font-mono">Token Duplication Active</div>
+                <div className="text-2xl font-black font-mono text-indigo-300 mt-2">
+                  {isLivePreviewEnabled ? 'CANLI AKTİF' : 'DEVRE DIŞI'}
+                </div>
+                <div className="text-[10px] text-indigo-400 mt-1 font-mono">
+                  {isLivePreviewEnabled ? '3s Canlı Akış & Otomatik İzleme' : 'Bant Genişliği Tasarrufu'}
+                </div>
               </div>
 
               <div className="glass-card rounded-2xl p-4 border-amber-500/20">
@@ -1471,7 +2070,7 @@ export default function App() {
                   <Zap className="w-4 h-4 text-amber-400" />
                 </div>
                 <div className="text-2xl font-black font-mono text-amber-400 mt-2">GATEWAY 3001</div>
-                <div className="text-[10px] text-slate-400 mt-1 font-mono">HTTP & WS Proxy Ready</div>
+                <div className="text-[10px] text-slate-400 mt-1 font-mono">TCP 6129 • WoL UDP 7,9 Hazır</div>
               </div>
             </div>
 
@@ -1506,94 +2105,468 @@ export default function App() {
                 </div>
               </div>
 
-              <button
-                onClick={() => setActiveModal('addHost')}
-                className="w-full sm:w-auto px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(56,189,248,0.25)] transition"
-              >
-                <Plus className="w-4 h-4" /> Yeni Sunucu Ekle
-              </button>
+              <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                {/* Live Preview Toggle */}
+                <button
+                  onClick={() => setIsLivePreviewEnabled(!isLivePreviewEnabled)}
+                  className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition ${
+                    isLivePreviewEnabled
+                      ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-[0_0_10px_rgba(99,102,241,0.2)]'
+                      : 'bg-slate-900 text-slate-400 border border-slate-800 hover:text-slate-200'
+                  }`}
+                  title="Canlı Ekran Önizleme Küçük Resimlerini Aç / Kapat"
+                >
+                  {isLivePreviewEnabled ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                  <span>{isLivePreviewEnabled ? 'Canlı Ekran: Açık' : 'Ekran: Kapalı'}</span>
+                </button>
+
+                {/* Manual Refresh Button */}
+                <button
+                  onClick={() => pollFleetStatus(allHosts, isLivePreviewEnabled)}
+                  disabled={isPollingFleet}
+                  className="px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:border-cyan-500/40 text-slate-300 hover:text-cyan-300 text-xs font-semibold flex items-center gap-1.5 transition disabled:opacity-50"
+                  title="Tüm Makinelerin Durumunu ve Ekran Görüntülerini Hemen Tara"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isPollingFleet ? 'animate-spin text-cyan-400' : ''}`} />
+                  <span>{isPollingFleet ? 'Taranıyor...' : 'Yenile'}</span>
+                </button>
+
+                <button
+                  onClick={() => setActiveModal('addHost')}
+                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(56,189,248,0.25)] transition"
+                >
+                  <Plus className="w-4 h-4" /> Yeni Sunucu Ekle
+                </button>
+              </div>
             </div>
 
             {/* SERVER FLEET RACK GRID */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-              {filteredHosts.map((h, idx) => (
-                <div
-                  key={`fleet-${h.id || 'host'}-${idx}`}
-                  className="glass-card rounded-2xl p-5 border border-slate-800 hover:border-cyan-500/50 flex flex-col justify-between group transition-all"
-                >
-                  <div>
-                    {/* Server Header */}
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-9 h-9 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center text-cyan-400 group-hover:border-cyan-500/40 transition">
-                          <Server className="w-4 h-4" />
-                        </div>
-                        <div>
-                          <h3 className="font-bold text-sm text-slate-100 group-hover:text-cyan-300 transition">
-                            {h.name}
-                          </h3>
-                          <div className="flex items-center gap-2 text-[11px] font-mono text-slate-400 mt-0.5">
-                            <span>{h.ip}</span>
-                            <span>•</span>
-                            <span className="text-cyan-400 font-semibold">{h.domain}</span>
+              {filteredHosts.map((h, idx) => {
+                const status = hostStatuses[h.id];
+                const isOnline = Boolean(status?.online);
+                const snap = hostSnapshots[h.id];
+
+                return (
+                  <div
+                    key={`fleet-${h.id || 'host'}-${idx}`}
+                    className={`glass-card rounded-2xl p-5 border border-slate-800 hover:border-cyan-500/50 flex flex-col justify-between group transition-all relative ${
+                      openPowerCardId === h.id ? 'z-30 ring-1 ring-rose-500/40 shadow-2xl' : 'z-10'
+                    }`}
+                  >
+                    <div>
+                      {/* Server Header */}
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-9 h-9 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center text-cyan-400 group-hover:border-cyan-500/40 transition">
+                            <Server className="w-4 h-4" />
+                          </div>
+                          <div>
+                            <h3 className="font-bold text-sm text-slate-100 group-hover:text-cyan-300 transition">
+                              {h.name}
+                            </h3>
+                            <div className="flex items-center gap-2 text-[11px] font-mono text-slate-400 mt-0.5">
+                              <span>{h.ip}</span>
+                              <span>•</span>
+                              <span className="text-cyan-400 font-semibold">{h.domain}</span>
+                            </div>
                           </div>
                         </div>
+
+                        {/* Real-Time Status Badge */}
+                        {isOnline ? (
+                          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 flex items-center gap-1.5 shadow-[0_0_10px_rgba(52,211,153,0.2)]">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 pulse-dot"></span>
+                            AÇIK {status?.latency ? `(${status.latency}ms)` : ''}
+                          </span>
+                        ) : (
+                          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-rose-950/80 text-rose-400 border border-rose-800/40 flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
+                            KAPALI
+                          </span>
+                        )}
                       </div>
 
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 pulse-dot"></span>
-                        ONLINE
-                      </span>
+                      {/* LIVE SCREEN PREVIEW THUMBNAIL (16:9) */}
+                      <div className="relative aspect-video w-full rounded-xl overflow-hidden bg-slate-950/90 border border-slate-800/80 my-3 group/thumb shadow-inner flex items-center justify-center">
+                        {isOnline && isLivePreviewEnabled && snap?.snapshot ? (
+                          <>
+                            <img
+                              src={snap.snapshot}
+                              alt={`${h.name} Canlı Ekran`}
+                              className="w-full h-full object-cover select-none transition-transform duration-300 group-hover/thumb:scale-105"
+                            />
+
+                            {/* Top Left: Live indicator badge */}
+                            <div className="absolute top-2 left-2 px-2 py-0.5 rounded bg-black/80 backdrop-blur-md border border-white/10 text-[9px] font-mono font-semibold text-emerald-400 flex items-center gap-1 shadow z-30 pointer-events-none select-none">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                              CANLI EKRAN
+                            </div>
+
+                            {/* Top Right: Direct Quick Power & Zoom Buttons (z-30 pointer-events-auto ALWAYS CLICKABLE) */}
+                            <div className="absolute top-2 right-2 flex items-center gap-1.5 z-30 pointer-events-auto">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setPreviewModalHost(h);
+                                }}
+                                className="p-1 rounded bg-black/85 hover:bg-black/95 backdrop-blur-md border border-white/20 text-slate-300 hover:text-cyan-300 transition shadow cursor-pointer"
+                                title="Ekranı Büyüt ve İncele (Gözetim Modu)"
+                              >
+                                <Maximize2 className="w-3 h-3" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  handleRemotePowerAction(h, 'shutdown');
+                                }}
+                                className="px-1.5 py-0.5 rounded bg-rose-950/90 hover:bg-rose-900 backdrop-blur-md border border-rose-500/50 text-[9px] font-mono font-bold text-rose-300 flex items-center gap-1 transition shadow hover:scale-105 cursor-pointer"
+                                title="Bilgisayarı Kapat (Shutdown)"
+                              >
+                                <Power className="w-2.5 h-2.5 text-rose-400" /> Kapat
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  handleRemotePowerAction(h, 'reboot');
+                                }}
+                                className="px-1.5 py-0.5 rounded bg-amber-950/90 hover:bg-amber-900 backdrop-blur-md border border-amber-500/50 text-[9px] font-mono font-bold text-amber-300 flex items-center gap-1 transition shadow hover:scale-105 cursor-pointer"
+                                title="Yeniden Başlat (Reboot)"
+                              >
+                                <RefreshCw className="w-2.5 h-2.5 text-amber-400" /> Reboot
+                              </button>
+                            </div>
+
+                            {/* Bottom Left: User & Res info */}
+                            {snap.user && (
+                              <div className="absolute bottom-2 left-2 px-2 py-0.5 rounded bg-black/80 backdrop-blur-md border border-white/10 text-[9px] font-mono text-slate-300 flex items-center gap-1.5 max-w-[60%] truncate shadow z-30 pointer-events-none select-none">
+                                <User className="w-2.5 h-2.5 text-cyan-400 shrink-0" />
+                                <span className="truncate">{snap.user}</span>
+                                {snap.width ? <span className="text-slate-500">• {snap.width}x{snap.height}</span> : null}
+                              </div>
+                            )}
+
+                            {/* Bottom Right: Manual Snapshot Refresh button */}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                pollFleetStatus([h], true);
+                              }}
+                              className="absolute bottom-2 right-2 px-2 py-0.5 rounded bg-black/85 hover:bg-black/95 backdrop-blur-md border border-white/20 text-[9px] font-mono text-cyan-300 flex items-center gap-1 transition shadow hover:scale-105 z-30 pointer-events-auto cursor-pointer"
+                              title="Ekranı Yeniden Çek (Snapshot Refresh)"
+                            >
+                              <Camera className="w-2.5 h-2.5 text-cyan-400" /> Yenile
+                            </button>
+
+                            {/* Center Hover Overlay (z-10 pointer-events-none so it NEVER blocks the top/bottom buttons) */}
+                            <div className="absolute inset-0 bg-slate-950/50 backdrop-blur-[1px] opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center pointer-events-none z-10">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleConnect(h);
+                                }}
+                                className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center gap-2 shadow-[0_0_20px_rgba(56,189,248,0.5)] transition transform scale-95 group-hover/thumb:scale-100 cursor-pointer pointer-events-auto"
+                              >
+                                <Monitor className="w-3.5 h-3.5" /> Canlı İzle & Yönet
+                              </button>
+                            </div>
+                          </>
+                        ) : isOnline ? (
+                          <div className="w-full h-full flex flex-col items-center justify-center p-4 text-center bg-gradient-to-b from-slate-900/60 to-slate-950 relative">
+                            {/* Direct Quick Power on Online with no snapshot */}
+                            <div className="absolute top-2 right-2 flex items-center gap-1 z-30 pointer-events-auto">
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); handleRemotePowerAction(h, 'shutdown'); }}
+                                className="px-1.5 py-0.5 rounded bg-rose-950/80 hover:bg-rose-900 border border-rose-500/40 text-[9px] font-mono font-bold text-rose-300 flex items-center gap-1 shadow cursor-pointer"
+                                title="Bilgisayarı Kapat"
+                              >
+                                <Power className="w-2.5 h-2.5 text-rose-400" /> Kapat
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); handleRemotePowerAction(h, 'reboot'); }}
+                                className="px-1.5 py-0.5 rounded bg-amber-950/80 hover:bg-amber-900 border border-amber-500/40 text-[9px] font-mono font-bold text-amber-300 flex items-center gap-1 shadow cursor-pointer"
+                                title="Yeniden Başlat"
+                              >
+                                <RefreshCw className="w-2.5 h-2.5 text-amber-400" /> Reboot
+                              </button>
+                            </div>
+                            <div className="w-10 h-10 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mb-1.5">
+                              <Monitor className="w-5 h-5" />
+                            </div>
+                            <span className="text-xs font-semibold text-slate-200">Makine Açık (Port 6129 Aktif)</span>
+                            <span className="text-[10px] text-cyan-400 font-mono mt-0.5 mb-2.5">Görüntü aktarımı hazır</span>
+                            <div className="flex items-center gap-2 z-30">
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); pollFleetStatus([h], true); }}
+                                className="px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 text-[10px] font-semibold flex items-center gap-1 transition cursor-pointer"
+                              >
+                                <Camera className="w-3 h-3" /> Ekranı Şimdi Çek
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleConnect(h)}
+                                className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[10px] font-semibold flex items-center gap-1 transition cursor-pointer"
+                              >
+                                <Zap className="w-3 h-3 fill-current" /> Doğrudan Bağlan
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="w-full h-full flex flex-col items-center justify-center p-3 text-center bg-gradient-to-b from-slate-950 to-rose-950/20">
+                            <div className="w-10 h-10 rounded-full bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400 mb-1.5">
+                              <Power className="w-5 h-5" />
+                            </div>
+                            <span className="text-xs font-semibold text-slate-300">Bilgisayar Kapalı / Uykuda</span>
+                            <span className="text-[10px] text-slate-500 font-mono mb-2">Ajan Portu (6129) Yanıt Vermiyor</span>
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); triggerWakeOnLan(h); }}
+                              className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-[11px] font-semibold flex items-center gap-1.5 transition shadow-[0_0_12px_rgba(245,158,11,0.2)] cursor-pointer"
+                            >
+                              <Zap className="w-3 h-3 fill-current" /> ⚡ Wake-on-LAN ile Aç
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Server Specs & Telemetry Badges */}
+                      <div className="grid grid-cols-2 gap-2 my-3 p-2.5 rounded-xl bg-slate-950/90 border border-slate-800/80 text-[11px] font-mono">
+                        <div>
+                          <span className="text-slate-500 block text-[10px]">İŞLETİM SİSTEMİ</span>
+                          <span className="text-slate-300 font-semibold">{h.os || 'Windows 11 Pro'}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block text-[10px]">AJAN SEVİYESİ</span>
+                          <span className={isOnline ? "text-emerald-400 font-semibold" : "text-slate-400 font-semibold"}>
+                            {isOnline ? 'SYSTEM (UAC OK)' : 'OFFLINE'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block text-[10px]">KULLANICI</span>
+                          <span className="text-slate-300 font-semibold">{snap?.user || h.user || 'Administrator'}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block text-[10px]">PORT / MAC</span>
+                          <span className="text-cyan-400 font-semibold truncate block" title={h.mac ? `${h.port || '6129'} • ${h.mac}` : (h.port || '6129')}>
+                            {h.port || '6129'} {h.mac ? `• ${h.mac.substring(0, 8)}...` : ''}
+                          </span>
+                        </div>
+                      </div>
                     </div>
 
-                    {/* Server Specs & Telemetry Badges */}
-                    <div className="grid grid-cols-2 gap-2 my-3 p-2.5 rounded-xl bg-slate-950/90 border border-slate-800/80 text-[11px] font-mono">
-                      <div>
-                        <span className="text-slate-500 block text-[10px]">İŞLETİM SİSTEMİ</span>
-                        <span className="text-slate-300 font-semibold">{h.os || 'Windows 11 Pro'}</span>
+                    {/* Actions Toolbar */}
+                    <div className="flex items-center gap-1.5 pt-3 border-t border-slate-800/80 relative">
+                      <button
+                        type="button"
+                        onClick={() => handleConnect(h)}
+                        className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 via-sky-500 to-indigo-600 hover:opacity-90 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-[0_0_15px_rgba(56,189,248,0.2)] transition truncate cursor-pointer"
+                      >
+                        <Zap className="w-3.5 h-3.5 fill-current shrink-0" /> 1-Click Bağlan
+                      </button>
+
+                      {/* POWER MANAGEMENT DROPDOWN BUTTON */}
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setOpenPowerCardId(openPowerCardId === h.id ? null : h.id);
+                          }}
+                          className={`p-2.5 rounded-xl border transition flex items-center gap-1 cursor-pointer ${
+                            openPowerCardId === h.id
+                              ? 'bg-rose-500/25 text-rose-300 border-rose-500/60 shadow-[0_0_12px_rgba(244,63,94,0.4)]'
+                              : 'bg-slate-900 hover:bg-rose-500/20 text-slate-300 hover:text-rose-300 border-slate-800'
+                          }`}
+                          title="Uzaktan Güç ve Sistem İşlemleri (Aç, Kapat, Yeniden Başlat, Kilitle, Uyku)"
+                        >
+                          <Power className="w-4 h-4 text-rose-400" />
+                          <ChevronDown className={`w-3 h-3 transition-transform ${openPowerCardId === h.id ? 'rotate-180' : ''}`} />
+                        </button>
+
+                        {/* FLOATING POWER DROPDOWN MENU */}
+                        {openPowerCardId === h.id && (
+                          <>
+                            {/* Backdrop to close when clicking outside */}
+                            <div
+                              className="fixed inset-0 z-40"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setOpenPowerCardId(null);
+                              }}
+                            />
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              className="absolute bottom-full right-0 mb-2 w-64 rounded-2xl bg-slate-900/98 backdrop-blur-2xl border border-slate-700 shadow-[0_10px_40px_rgba(0,0,0,0.85)] p-2 z-50 animate-in fade-in zoom-in-95 duration-150"
+                            >
+                              <div className="px-2.5 py-1.5 text-[10px] font-mono font-bold text-slate-400 uppercase tracking-wider border-b border-slate-800 mb-1.5 flex items-center justify-between">
+                                <span>⚡ GÜÇ YÖNETİMİ</span>
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] ${isOnline ? 'bg-emerald-950 text-emerald-400' : 'bg-rose-950 text-rose-400'}`}>
+                                  {isOnline ? 'ONLINE' : 'OFFLINE'}
+                                </span>
+                              </div>
+
+                              {/* Wake-on-LAN */}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenPowerCardId(null);
+                                  triggerWakeOnLan(h);
+                                }}
+                                className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-amber-500/15 text-slate-200 hover:text-amber-300 text-xs flex items-center gap-2.5 transition group cursor-pointer"
+                              >
+                                <div className="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 group-hover:scale-105 transition shrink-0">
+                                  <Zap className="w-3.5 h-3.5 fill-current" />
+                                </div>
+                                <div>
+                                  <div className="font-semibold text-slate-200 group-hover:text-amber-300">Bilgisayarı Aç (WoL)</div>
+                                  <div className="text-[10px] text-slate-400">Sihirli Paket gönder</div>
+                                </div>
+                              </button>
+
+                              {/* Shutdown */}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenPowerCardId(null);
+                                  handleRemotePowerAction(h, 'shutdown');
+                                }}
+                                className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-rose-500/15 text-slate-200 hover:text-rose-300 text-xs flex items-center gap-2.5 transition group cursor-pointer"
+                              >
+                                <div className="w-7 h-7 rounded-lg bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400 group-hover:scale-105 transition shrink-0">
+                                  <Power className="w-3.5 h-3.5" />
+                                </div>
+                                <div>
+                                  <div className="font-semibold text-slate-200 group-hover:text-rose-300">Bilgisayarı Kapat</div>
+                                  <div className="text-[10px] text-slate-400">Sistemi güvenle kapat (shutdown)</div>
+                                </div>
+                              </button>
+
+                              {/* Reboot */}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenPowerCardId(null);
+                                  handleRemotePowerAction(h, 'reboot');
+                                }}
+                                className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-amber-500/15 text-slate-200 hover:text-amber-300 text-xs flex items-center gap-2.5 transition group cursor-pointer"
+                              >
+                                <div className="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 group-hover:scale-105 transition shrink-0">
+                                  <RefreshCw className="w-3.5 h-3.5" />
+                                </div>
+                                <div>
+                                  <div className="font-semibold text-slate-200 group-hover:text-amber-300">Yeniden Başlat (Reboot)</div>
+                                  <div className="text-[10px] text-slate-400">Sistemi yeniden başlat</div>
+                                </div>
+                              </button>
+
+                              {/* Lock */}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenPowerCardId(null);
+                                  handleRemotePowerAction(h, 'lock');
+                                }}
+                                className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-blue-500/15 text-slate-200 hover:text-blue-300 text-xs flex items-center gap-2.5 transition group cursor-pointer"
+                              >
+                                <div className="w-7 h-7 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400 group-hover:scale-105 transition shrink-0">
+                                  <Lock className="w-3.5 h-3.5" />
+                                </div>
+                                <div>
+                                  <div className="font-semibold text-slate-200 group-hover:text-blue-300">Oturumu Kilitle</div>
+                                  <div className="text-[10px] text-slate-400">LockWorkStation</div>
+                                </div>
+                              </button>
+
+                              {/* Sleep */}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenPowerCardId(null);
+                                  handleRemotePowerAction(h, 'sleep');
+                                }}
+                                className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-purple-500/15 text-slate-200 hover:text-purple-300 text-xs flex items-center gap-2.5 transition group cursor-pointer"
+                              >
+                                <div className="w-7 h-7 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 group-hover:scale-105 transition shrink-0">
+                                  <Moon className="w-3.5 h-3.5" />
+                                </div>
+                                <div>
+                                  <div className="font-semibold text-slate-200 group-hover:text-purple-300">Uyku Modu (Sleep)</div>
+                                  <div className="text-[10px] text-slate-400">Askıya al</div>
+                                </div>
+                              </button>
+
+                              {/* Abort */}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenPowerCardId(null);
+                                  handleRemotePowerAction(h, 'abort');
+                                }}
+                                className="w-full text-left px-2.5 py-1.5 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-slate-200 text-xs flex items-center gap-2.5 transition border-t border-slate-800/80 mt-1 cursor-pointer"
+                              >
+                                <div className="w-7 h-7 rounded-lg bg-slate-800 flex items-center justify-center text-slate-400 shrink-0">
+                                  <AlertTriangle className="w-3.5 h-3.5" />
+                                </div>
+                                <div>
+                                  <div className="font-semibold">Kapatmayı İptal Et</div>
+                                  <div className="text-[10px] text-slate-500">shutdown /a</div>
+                                </div>
+                              </button>
+                            </div>
+                          </>
+                        )}
                       </div>
-                      <div>
-                        <span className="text-slate-500 block text-[10px]">AJAN SEVİYESİ</span>
-                        <span className="text-emerald-400 font-semibold">SYSTEM (UAC OK)</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 block text-[10px]">KULLANICI</span>
-                        <span className="text-slate-300 font-semibold">{h.user || 'Administrator'}</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 block text-[10px]">PORT</span>
-                        <span className="text-cyan-400 font-semibold">{h.port || '6129'}</span>
-                      </div>
+
+                      {/* Reinstall Agent */}
+                      <button
+                        onClick={() => handleConnect(h, { forceReinstall: true })}
+                        className="p-2.5 rounded-xl bg-slate-900 hover:bg-cyan-500/20 text-slate-400 hover:text-cyan-400 border border-slate-800 transition"
+                        title="Agent'ı Sıfırdan Kur, Güncelle ve Bağlan"
+                      >
+                        <Download className="w-4 h-4" />
+                      </button>
+
+                      {/* Edit Host */}
+                      <button
+                        onClick={() => handleOpenEditHost(h)}
+                        className="p-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-amber-400 border border-slate-800 transition"
+                        title="Sunucu Bilgilerini Düzenle"
+                      >
+                        <Settings className="w-4 h-4" />
+                      </button>
+
+                      {/* Delete Host */}
+                      <button
+                        onClick={() => handleDeleteHost(h.id)}
+                        className="p-2.5 rounded-xl bg-slate-900 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-slate-800 transition"
+                        title="Sunucuyu Sil"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
-
-                  {/* Actions */}
-                  <div className="flex items-center gap-2 pt-3 border-t border-slate-800/80">
-                    <button
-                      onClick={() => handleConnect(h)}
-                      className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 via-sky-500 to-indigo-600 hover:opacity-90 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-[0_0_15px_rgba(56,189,248,0.2)] transition"
-                    >
-                      <Zap className="w-3.5 h-3.5 fill-current" /> 1-Click Bağlan
-                    </button>
-
-                    <button
-                      onClick={() => handleOpenEditHost(h)}
-                      className="p-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-amber-400 border border-slate-800 transition"
-                      title="Sunucu Bilgilerini Düzenle"
-                    >
-                      <Settings className="w-4 h-4" />
-                    </button>
-
-                    <button
-                      onClick={() => handleDeleteHost(h.id)}
-                      className="p-2.5 rounded-xl bg-slate-900 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-slate-800 transition"
-                      title="Sunucuyu Sil"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
 
               {/* ADD NEW SERVER QUICK CARD */}
               <div
@@ -1952,31 +2925,108 @@ export default function App() {
         ========================================================================= */}
         {activeTab === 'chat' && (
           <div className="flex-1 flex flex-col p-6 overflow-hidden bg-grid-pattern">
-            <div className="mb-4">
-              <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
-                <MessageSquare className="w-5 h-5 text-emerald-400" /> Operasyon & Kullanıcı Sohbeti
-              </h2>
-              <p className="text-xs text-slate-400">Uzak makinedeki kullanıcı ile gerçek zamanlı yazışma</p>
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+                  <MessageSquare className="w-5 h-5 text-emerald-400" /> Operasyon & Kullanıcı Sohbeti
+                </h2>
+                <p className="text-xs text-slate-400">Uzak makinedeki kullanıcı ile gerçek zamanlı yazışma ve destek</p>
+              </div>
+
+              {isConnected && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={sendAudioBeep}
+                    className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition"
+                    title="Karşı bilgisayarda Windows dikkat sesi çal"
+                  >
+                    <Bell className="w-3.5 h-3.5 text-amber-400" /> Karşıda Zil Çal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('console')}
+                    className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-cyan-600 to-sky-600 hover:from-cyan-500 hover:to-sky-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-cyan-600/25 transition cursor-pointer"
+                  >
+                    <Monitor className="w-3.5 h-3.5" /> 🖥️ Masaüstü Yayınına Dön
+                  </button>
+                </div>
+              )}
             </div>
+
+            {/* Connection Status Banner */}
+            {isConnected ? (
+              <div className="mb-3 px-4 py-2.5 rounded-xl bg-slate-950/80 border border-emerald-500/30 flex items-center justify-between text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 pulse-dot"></span>
+                  <span className="text-emerald-300 font-bold">Canlı Bağlantı Aktif:</span>
+                  <span className="font-mono text-slate-200">{agentInfo?.hostname || targetHost} ({targetHost}:{targetPort})</span>
+                  <span className="text-slate-500">•</span>
+                  <span className="text-slate-400">Karşı kullanıcının ekranında sohbet penceresi açık</span>
+                </div>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 font-bold">
+                  CANLI İLETİŞİM
+                </span>
+              </div>
+            ) : (
+              <div className="mb-3 px-4 py-3 rounded-xl bg-slate-950/80 border border-amber-500/30 flex items-center justify-between text-xs">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-amber-400" />
+                  <span className="text-amber-300 font-medium">Aktif bir uzak masaüstü oturumu bağlı değil.</span>
+                  <span className="text-slate-400">Karşı kullanıcı ile yazışmak için lütfen bir sunucuya bağlanın.</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('fleet')}
+                    className="px-3 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-[11px] font-semibold transition"
+                  >
+                    Sunucu Filosu
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('console')}
+                    className="px-3 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-[11px] font-bold transition"
+                  >
+                    Canlı Konsola Git
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="flex-1 glass-card rounded-2xl border border-slate-800 flex flex-col overflow-hidden p-4">
               <div className="flex-1 overflow-y-auto space-y-3 mb-4 pr-2">
-                {chatMessages.map((msg, idx) => (
-                  <div
-                    key={idx}
-                    className={`p-3 rounded-2xl max-w-lg text-xs ${
-                      msg.sender.includes('You')
-                        ? 'ml-auto bg-gradient-to-r from-cyan-600 to-sky-600 text-white'
-                        : 'bg-slate-900 border border-slate-800 text-slate-200'
-                    }`}
-                  >
-                    <div className="flex justify-between text-[10px] opacity-75 font-mono mb-1 gap-4">
-                      <span>{msg.sender}</span>
-                      <span>{msg.time}</span>
-                    </div>
-                    <div>{msg.text}</div>
+                {chatMessages.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-slate-500 text-xs">
+                    <MessageSquare className="w-10 h-10 text-slate-700 mb-2" />
+                    <p>Henüz bir mesaj bulunmuyor.</p>
+                    <p className="text-[11px] text-slate-600 mt-0.5">Aşağıdaki alandan karşı kullanıcıya ilk mesajınızı gönderebilirsiniz.</p>
                   </div>
-                ))}
+                ) : (
+                  chatMessages.map((msg, idx) => {
+                    const isTech = msg.sender.includes('You') || msg.sender.includes('Technician') || msg.sender.includes('Teknisyen');
+                    const isSys = msg.sender.includes('System') || msg.sender.includes('Sistem');
+                    return (
+                      <div
+                        key={idx}
+                        className={`p-3 rounded-2xl max-w-lg text-xs ${
+                          isTech
+                            ? 'ml-auto bg-gradient-to-r from-cyan-600 to-sky-600 text-white shadow-md'
+                            : isSys
+                            ? 'mx-auto bg-slate-900/60 border border-slate-800 text-slate-400 text-center w-full max-w-md'
+                            : 'bg-slate-900 border border-slate-800 text-slate-200'
+                        }`}
+                      >
+                        <div className="flex justify-between text-[10px] opacity-75 font-mono mb-1 gap-4">
+                          <span className="font-bold">{msg.sender}</span>
+                          <span>{msg.time}</span>
+                        </div>
+                        <div className="font-sans leading-relaxed break-words">{msg.text}</div>
+                      </div>
+                    );
+                  })
+                )}
+                <div ref={chatEndRef} />
               </div>
 
               <form onSubmit={handleSendChat} className="flex gap-2">
@@ -1984,12 +3034,14 @@ export default function App() {
                   type="text"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Mesajınızı yazın..."
-                  className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 outline-none focus:border-cyan-500"
+                  placeholder={isConnected ? "Karşı kullanıcıya mesaj ilet... (Enter ile gönder)" : "Mesaj yazmak için önce bir istemciye bağlanın..."}
+                  disabled={!isConnected}
+                  className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 outline-none focus:border-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed"
                 />
                 <button
                   type="submit"
-                  className="px-5 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold flex items-center gap-1.5 transition"
+                  disabled={!isConnected}
+                  className="px-5 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold flex items-center gap-1.5 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                 >
                   <Send className="w-3.5 h-3.5" /> Gönder
                 </button>
@@ -2287,6 +3339,40 @@ export default function App() {
                 </div>
               </div>
 
+              <div>
+                <label className="text-slate-400 mb-1 block">MAC Adresi (Wake-on-LAN için):</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={editingHost.mac || ''}
+                    placeholder="Örn: 00:1A:2B:3C:4D:5E (Otomatik algılanır)"
+                    onChange={(e) => setEditingHost({ ...editingHost, mac: e.target.value.toUpperCase() })}
+                    className="flex-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-slate-100"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!editingHost.ip) return;
+                      try {
+                        const res = await fetch(`http://localhost:3001/api/power/mac?ip=${encodeURIComponent(editingHost.ip)}`);
+                        const data = await res.json();
+                        if (data.mac) {
+                          setEditingHost(prev => ({ ...prev, mac: data.mac.toUpperCase() }));
+                        } else {
+                          alert('Bu IP için ağda MAC adresi bulunamadı. Makine açıkken tekrar deneyin.');
+                        }
+                      } catch (err) {
+                        alert('MAC sorgulama hatası: ' + err.message);
+                      }
+                    }}
+                    className="px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-cyan-400 border border-slate-800 font-bold transition flex items-center gap-1.5"
+                    title="Ağdaki ARP tablosundan MAC adresini otomatik getir"
+                  >
+                    <Search className="w-3.5 h-3.5" /> Bul
+                  </button>
+                </div>
+              </div>
+
               <div className="pt-3 flex justify-between items-center border-t border-slate-800">
                 <button
                   type="button"
@@ -2352,6 +3438,106 @@ export default function App() {
                 >
                   <Download className="w-4 h-4" /> .EXE İndir
                 </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 4: FULL-SCREEN LIVE SCREEN PREVIEW & REMOTE SURVEILLANCE */}
+      {previewModalHost && (
+        <div
+          className="fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex flex-col items-center justify-center p-4"
+          onClick={() => setPreviewModalHost(null)}
+        >
+          <div
+            className="max-w-5xl w-full bg-slate-950 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl flex flex-col animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="px-5 py-3.5 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-3 h-3 rounded-full bg-emerald-400 animate-pulse"></div>
+                <div>
+                  <h3 className="font-bold text-sm text-slate-200 flex items-center gap-2">
+                    {previewModalHost.name}
+                    <span className="text-xs font-mono text-cyan-400 font-normal">({previewModalHost.ip})</span>
+                  </h3>
+                  <p className="text-[11px] text-slate-400 font-mono">
+                    Canlı Gözetim Önizlemesi • Bağlantı Kurulmadan Doğrudan Görüntüleniyor
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => pollFleetStatus([previewModalHost], true)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-semibold flex items-center gap-1.5 border border-slate-700 transition"
+                >
+                  <Camera className="w-3.5 h-3.5" /> Şimdi Yenile
+                </button>
+                <button
+                  onClick={() => {
+                    const target = previewModalHost;
+                    setPreviewModalHost(null);
+                    handleConnect(target);
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-cyan-600 to-sky-500 hover:opacity-90 text-white font-bold text-xs flex items-center gap-1.5 transition"
+                >
+                  <Monitor className="w-3.5 h-3.5" /> Canlı Bağlan & Yönet
+                </button>
+                <button
+                  onClick={() => setPreviewModalHost(null)}
+                  className="p-1.5 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white transition"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Screen Frame Display */}
+            <div className="p-4 bg-black flex items-center justify-center min-h-[420px] max-h-[75vh] overflow-hidden">
+              {hostSnapshots[previewModalHost.id]?.snapshot ? (
+                <img
+                  src={hostSnapshots[previewModalHost.id].snapshot}
+                  alt={`${previewModalHost.name} Canlı Ekran`}
+                  className="max-h-[70vh] w-auto max-w-full object-contain rounded-lg border border-slate-800 shadow-2xl"
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center text-slate-500 py-16">
+                  <Monitor className="w-12 h-12 mb-3 text-slate-600 animate-pulse" />
+                  <p className="text-sm font-semibold text-slate-300">Ekran görüntüsü alınıyor...</p>
+                  <p className="text-xs text-slate-500 mt-1">Ajan üzerinden anlık görüntü talep edildi</p>
+                </div>
+              )}
+            </div>
+
+            {/* Footer Power Actions in Modal */}
+            <div className="px-5 py-3 bg-slate-900/90 border-t border-slate-800 flex items-center justify-between text-xs font-mono">
+              <div className="text-slate-400 flex items-center gap-3">
+                <span>Kullanıcı: <b className="text-slate-200">{hostSnapshots[previewModalHost.id]?.user || previewModalHost.user || 'Administrator'}</b></span>
+                {hostSnapshots[previewModalHost.id]?.width && (
+                  <span>Çözünürlük: <b className="text-slate-200">{hostSnapshots[previewModalHost.id].width}x{hostSnapshots[previewModalHost.id].height}</b></span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleRemotePowerAction(previewModalHost, 'lock')}
+                  className="px-2.5 py-1.5 rounded-lg bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 border border-blue-500/40 text-xs font-semibold flex items-center gap-1.5 transition"
+                >
+                  <Lock className="w-3.5 h-3.5" /> Kilitle
+                </button>
+                <button
+                  onClick={() => handleRemotePowerAction(previewModalHost, 'reboot')}
+                  className="px-2.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-semibold flex items-center gap-1.5 transition"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" /> Yeniden Başlat
+                </button>
+                <button
+                  onClick={() => handleRemotePowerAction(previewModalHost, 'shutdown')}
+                  className="px-2.5 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-xs font-semibold flex items-center gap-1.5 transition"
+                >
+                  <Power className="w-3.5 h-3.5" /> Kapat
+                </button>
               </div>
             </div>
           </div>

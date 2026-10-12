@@ -12,7 +12,12 @@ SCM (Service Control Manager) modunda:
   SendInput ile fare/klavye kontrolu
 """
 
-import sys, os, time, json, socket, threading, io, ctypes, ctypes.wintypes, base64
+import sys, os, time, json, socket, threading, io, ctypes, ctypes.wintypes, base64, queue, winsound
+try:
+    import tkinter as tk
+    from tkinter import scrolledtext
+except Exception:
+    pass
 
 kernel32 = ctypes.windll.kernel32
 userenv  = ctypes.windll.userenv
@@ -59,17 +64,11 @@ class BITMAPINFOHEADER(ctypes.Structure):
         ('biClrImportant', ctypes.c_uint32),
     ]
 
-# ─── WTS / Kullanici Oturumu Launcher ───────────────────────
-def get_active_session():
-    try:
-        return kernel32.WTSGetActiveConsoleSessionId()
-    except AttributeError:
-        # Fallback for older windows versions if somehow kernel32 doesn't have it
-        return 1
-
+# ─── WTS / Kullanici Oturumu Launcher & SAS ───────────────────────
 advapi32 = ctypes.windll.advapi32
+kernel32 = ctypes.windll.kernel32
+wtsapi32 = ctypes.windll.wtsapi32
 
-# Setup proper ctypes for 64-bit pointers
 kernel32.GetCurrentProcess.restype = ctypes.c_void_p
 advapi32.OpenProcessToken.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
 advapi32.OpenProcessToken.restype = ctypes.c_int32
@@ -80,72 +79,234 @@ advapi32.SetTokenInformation.restype = ctypes.c_int32
 advapi32.CreateProcessAsUserW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_void_p]
 advapi32.CreateProcessAsUserW.restype = ctypes.c_int32
 
-def get_system_token_for_session(session_id):
-    hToken = ctypes.c_void_p()
-    # TOKEN_ALL_ACCESS = 0xF01FF
-    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0xF01FF, ctypes.byref(hToken)):
-        return None
-    
-    hTokenDup = ctypes.c_void_p()
-    class SECURITY_ATTRIBUTES(ctypes.Structure):
-        _fields_ = [("nLength", ctypes.c_uint32), ("lpSecurityDescriptor", ctypes.c_void_p), ("bInheritHandle", ctypes.c_int32)]
-    sa = SECURITY_ATTRIBUTES()
-    sa.nLength = ctypes.sizeof(SECURITY_ATTRIBUTES)
-    
-    # SecurityImpersonation = 2, TokenPrimary = 1
-    if not advapi32.DuplicateTokenEx(hToken, 0xF01FF, ctypes.byref(sa), 2, 1, ctypes.byref(hTokenDup)):
-        kernel32.CloseHandle(hToken)
-        return None
-        
-    kernel32.CloseHandle(hToken)
-    
-    # TokenSessionId = 12
-    sess_id = ctypes.c_uint32(session_id)
-    advapi32.SetTokenInformation(hTokenDup, 12, ctypes.byref(sess_id), ctypes.sizeof(sess_id))
-    return hTokenDup
+class PROCESSENTRY32(ctypes.Structure):
+    _fields_ = [
+        ('dwSize', ctypes.wintypes.DWORD), ('cntUsage', ctypes.wintypes.DWORD),
+        ('th32ProcessID', ctypes.wintypes.DWORD), ('th32DefaultHeapID', ctypes.c_void_p),
+        ('th32ModuleID', ctypes.wintypes.DWORD), ('cntThreads', ctypes.wintypes.DWORD),
+        ('th32ParentProcessID', ctypes.wintypes.DWORD), ('pcPriClassBase', ctypes.c_long),
+        ('dwFlags', ctypes.wintypes.DWORD), ('szExeFile', ctypes.c_char * 260)
+    ]
 
-def launch_server_in_user_session():
-    """SYSTEM olarak calisirken kullanici masaustunde --server baslatir."""
+def enable_all_privileges():
+    """Gereken tum sistem ayricaliklarini (Tcb, PrimaryToken, Debug, Shutdown) aktif eder."""
+    try:
+        import winreg
+        with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", 0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, "SoftwareSASGeneration", 0, winreg.REG_DWORD, 3)
+            winreg.SetValueEx(k, "PromptOnSecureDesktop", 0, winreg.REG_DWORD, 0)
+    except: pass
+
+    try:
+        hToken = ctypes.c_void_p()
+        if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0020 | 0x0008, ctypes.byref(hToken)):
+            return
+        class LUID(ctypes.Structure):
+            _fields_ = [('LowPart', ctypes.wintypes.DWORD), ('HighPart', ctypes.wintypes.LONG)]
+        class LUID_AND_ATTRIBUTES(ctypes.Structure):
+            _fields_ = [('Luid', LUID), ('Attributes', ctypes.wintypes.DWORD)]
+        class TOKEN_PRIVILEGES(ctypes.Structure):
+            _fields_ = [('PrivilegeCount', ctypes.wintypes.DWORD), ('Privileges', LUID_AND_ATTRIBUTES * 1)]
+
+        for priv in ['SeTcbPrivilege', 'SeAssignPrimaryTokenPrivilege', 'SeIncreaseQuotaPrivilege', 'SeDebugPrivilege', 'SeShutdownPrivilege']:
+            luid = LUID()
+            if advapi32.LookupPrivilegeValueW(None, priv, ctypes.byref(luid)):
+                tp = TOKEN_PRIVILEGES()
+                tp.PrivilegeCount = 1
+                tp.Privileges[0].Luid = luid
+                tp.Privileges[0].Attributes = 0x00000002 # SE_PRIVILEGE_ENABLED
+                advapi32.AdjustTokenPrivileges(hToken, False, ctypes.byref(tp), 0, None, None)
+        kernel32.CloseHandle(hToken)
+    except: pass
+
+def get_active_session():
+    """Aktif konsol veya etkilesimli kullanici oturum kimligini dondurur."""
+    # 1. explorer.exe oturumu (kullanicinin masaustu oturumu - en dogru ve stabil olan)
+    try:
+        hSnap = kernel32.CreateToolhelp32Snapshot(2, 0)
+        pe = PROCESSENTRY32()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        if kernel32.Process32First(hSnap, ctypes.byref(pe)):
+            while True:
+                name = pe.szExeFile.decode('latin1', errors='ignore').lower()
+                if 'explorer.exe' in name:
+                    s = ctypes.wintypes.DWORD()
+                    kernel32.ProcessIdToSessionId(pe.th32ProcessID, ctypes.byref(s))
+                    if s.value > 0:
+                        kernel32.CloseHandle(hSnap)
+                        return s.value
+                if not kernel32.Process32Next(hSnap, ctypes.byref(pe)): break
+        kernel32.CloseHandle(hSnap)
+    except: pass
+
+    # 2. Standart aktif konsol oturumu
+    try:
+        sess = kernel32.WTSGetActiveConsoleSessionId()
+        if sess != 0xFFFFFFFF and sess > 0:
+            return sess
+    except: pass
+
+    # 3. winlogon / logonui (kilit ekrani oturumu)
+    try:
+        hSnap = kernel32.CreateToolhelp32Snapshot(2, 0)
+        pe = PROCESSENTRY32()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        if kernel32.Process32First(hSnap, ctypes.byref(pe)):
+            while True:
+                name = pe.szExeFile.decode('latin1', errors='ignore').lower()
+                if any(x in name for x in ['logonui.exe', 'winlogon.exe']):
+                    s = ctypes.wintypes.DWORD()
+                    kernel32.ProcessIdToSessionId(pe.th32ProcessID, ctypes.byref(s))
+                    if s.value > 0:
+                        kernel32.CloseHandle(hSnap)
+                        return s.value
+                if not kernel32.Process32Next(hSnap, ctypes.byref(pe)): break
+        kernel32.CloseHandle(hSnap)
+    except: pass
+    return 1
+
+def get_system_token_for_session(session_id):
+    """Hedef oturum icin Winlogon/LogonUI veya SYSTEM tokenini elde eder."""
+    # Strateji 1: Oturumdaki winlogon veya logonui surecinden token al (En garantili)
+    try:
+        hSnap = kernel32.CreateToolhelp32Snapshot(2, 0)
+        pe = PROCESSENTRY32()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        target_pids = []
+        if kernel32.Process32First(hSnap, ctypes.byref(pe)):
+            while True:
+                name = pe.szExeFile.decode('latin1', errors='ignore').lower()
+                s = ctypes.wintypes.DWORD()
+                kernel32.ProcessIdToSessionId(pe.th32ProcessID, ctypes.byref(s))
+                if s.value == session_id:
+                    target_pids.append((name, pe.th32ProcessID))
+                if not kernel32.Process32Next(hSnap, ctypes.byref(pe)): break
+        kernel32.CloseHandle(hSnap)
+
+        order = ['winlogon.exe', 'logonui.exe', 'csrss.exe', 'explorer.exe', 'taskhostw.exe']
+        target_pids.sort(key=lambda x: (order.index(x[0]) if x[0] in order else 999))
+
+        for name, pid in target_pids:
+            hProc = kernel32.OpenProcess(0x1000 | 0x0400, False, pid)
+            if hProc:
+                hTok = ctypes.c_void_p()
+                if advapi32.OpenProcessToken(hProc, 0x0002 | 0x0004 | 0x0008, ctypes.byref(hTok)):
+                    hDup = ctypes.c_void_p()
+                    if advapi32.DuplicateTokenEx(hTok, 0xF01FF, None, 2, 1, ctypes.byref(hDup)):
+                        kernel32.CloseHandle(hTok)
+                        kernel32.CloseHandle(hProc)
+                        return hDup
+                    kernel32.CloseHandle(hTok)
+                kernel32.CloseHandle(hProc)
+    except: pass
+
+    # Strateji 2: WTSQueryUserToken
+    try:
+        hTok = ctypes.c_void_p()
+        if wtsapi32.WTSQueryUserToken(session_id, ctypes.byref(hTok)):
+            hDup = ctypes.c_void_p()
+            if advapi32.DuplicateTokenEx(hTok, 0xF01FF, None, 2, 1, ctypes.byref(hDup)):
+                kernel32.CloseHandle(hTok)
+                return hDup
+            kernel32.CloseHandle(hTok)
+    except: pass
+
+    # Strateji 3: Kendi SYSTEM tokenini klonlayip SessionId set et
+    try:
+        hToken = ctypes.c_void_p()
+        if advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0xF01FF, ctypes.byref(hToken)):
+            hTokenDup = ctypes.c_void_p()
+            if advapi32.DuplicateTokenEx(hToken, 0xF01FF, None, 2, 1, ctypes.byref(hTokenDup)):
+                kernel32.CloseHandle(hToken)
+                sess_id = ctypes.c_uint32(session_id)
+                advapi32.SetTokenInformation(hTokenDup, 12, ctypes.byref(sess_id), ctypes.sizeof(sess_id))
+                return hTokenDup
+            kernel32.CloseHandle(hToken)
+    except: pass
+    return None
+
+def launch_in_user_session(flag='--server'):
+    """SYSTEM veya normal yetkiyle calisirken hedef oturumda surec baslatir."""
     session_id = get_active_session()
     if session_id == 0xFFFFFFFF:
-        return False
+        session_id = 1
         
     token = get_system_token_for_session(session_id)
-    if not token: return False
+    if not token:
+        try:
+            exe = AGENT_PATH if getattr(sys, 'frozen', False) else sys.executable
+            args = [exe, flag] if getattr(sys, 'frozen', False) else [exe, AGENT_PATH, flag]
+            subprocess.Popen(args)
+            return True
+        except:
+            return False
 
     env_block = ctypes.c_void_p()
     userenv.CreateEnvironmentBlock(ctypes.byref(env_block), token, False)
 
-    si = STARTUPINFO()
-    si.cb          = ctypes.sizeof(STARTUPINFO)
-    si.lpDesktop   = "WinSta0\\Default"
-    si.dwFlags     = 0x00000001
-    si.wShowWindow = 0
-
-    pi  = PROCESS_INFORMATION()
     if getattr(sys, 'frozen', False):
-        cmd_str = f'"{AGENT_PATH}" --server'
+        cmd_str = f'"{AGENT_PATH}" {flag}'
     else:
-        cmd_str = f'"{sys.executable}" "{AGENT_PATH}" --server'
+        cmd_str = f'"{sys.executable}" "{AGENT_PATH}" {flag}'
 
-    cmd_buf = ctypes.create_unicode_buffer(cmd_str)
+    desktops_to_try = ["WinSta0\\Default", "WinSta0\\Winlogon", ""]
+    ok = False
+    last_err = 0
+    pi = PROCESS_INFORMATION()
 
-    ok = advapi32.CreateProcessAsUserW(
-        token, None, cmd_buf, None, None, False,
-        0x00000400 | 0x08000000,
-        env_block if env_block else None,
-        None, ctypes.byref(si), ctypes.byref(pi)
-    )
+    for d in desktops_to_try:
+        si = STARTUPINFO()
+        si.cb          = ctypes.sizeof(STARTUPINFO)
+        si.lpDesktop   = d
+        si.dwFlags     = 0x00000001
+        si.wShowWindow = 1 if flag == '--chat-ui' else 0
+
+        cmd_buf = ctypes.create_unicode_buffer(cmd_str)
+        creation_flags = 0x00000400
+        if flag == '--server':
+            creation_flags |= 0x08000000
+        ok = advapi32.CreateProcessAsUserW(
+            token, None, cmd_buf, None, None, False,
+            creation_flags,
+            env_block if env_block else None,
+            None, ctypes.byref(si), ctypes.byref(pi)
+        )
+        if ok:
+            kernel32.CloseHandle(pi.hProcess)
+            kernel32.CloseHandle(pi.hThread)
+            break
+        else:
+            last_err = kernel32.GetLastError()
+
     if env_block: userenv.DestroyEnvironmentBlock(env_block)
+    kernel32.CloseHandle(token)
+
     log_file = os.path.join(os.path.dirname(AGENT_PATH), "agent_debug.log")
-    if ok:
-        kernel32.CloseHandle(pi.hProcess)
-        kernel32.CloseHandle(pi.hThread)
-        with open(log_file, "a") as f: f.write(f"[{time.time()}] Launched --server in session {session_id} successfully.\n")
-    else:
-        err = kernel32.GetLastError()
-        with open(log_file, "a") as f: f.write(f"[{time.time()}] CreateProcessAsUserW failed with error {err}\n")
+    try:
+        with open(log_file, "a") as f:
+            if ok:
+                f.write(f"[{time.time()}] Launched {flag} in session {session_id} successfully.\n")
+            else:
+                f.write(f"[{time.time()}] CreateProcessAsUserW for {flag} failed in session {session_id} (err={last_err}).\n")
+    except: pass
     return bool(ok)
+
+def launch_server_in_user_session():
+    return launch_in_user_session('--server')
+
+def launch_chat_in_user_session():
+    # Eger ajan su anda zaten interaktif kullanici oturumundaysa (Session > 0), direkt baslat
+    try:
+        curr_sess = ctypes.c_ulong()
+        kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(), ctypes.byref(curr_sess))
+        if curr_sess.value > 0:
+            exe = AGENT_PATH if getattr(sys, 'frozen', False) else sys.executable
+            args = [exe, '--chat-ui'] if getattr(sys, 'frozen', False) else [exe, AGENT_PATH, '--chat-ui']
+            subprocess.Popen(args)
+            return True
+    except:
+        pass
+    return launch_in_user_session('--chat-ui')
 
 def server_running():
     try:
@@ -155,35 +316,55 @@ def server_running():
 
 def watchdog_loop():
     """Arka planda calisir: server yoksa veya aktif oturum degistiyse yeniden baslatir."""
+    enable_all_privileges()
     log_file = os.path.join(os.path.dirname(AGENT_PATH), "agent_debug.log")
     os.system('netsh advfirewall firewall delete rule name=RemoteMMAgent >nul 2>&1')
     os.system(f'netsh advfirewall firewall add rule name=RemoteMMAgent dir=in action=allow protocol=TCP localport={PORT} >nul 2>&1')
     last_launch = 0
-    last_session = 0xFFFFFFFF
-    with open(log_file, "a") as f: f.write(f"[{time.time()}] Watchdog started in session {get_active_session()}.\n")
+    stable_session = get_active_session()
+    candidate_session = stable_session
+    candidate_count = 0
+    try:
+        with open(log_file, "a") as f: f.write(f"[{time.time()}] Watchdog started in session {stable_session}.\n")
+    except: pass
+
     while True:
         try:
             curr_sess = get_active_session()
             now = time.time()
-            if curr_sess != 0xFFFFFFFF:
-                need_launch = False
-                if curr_sess != last_session:
-                    with open(log_file, "a") as f:
-                        f.write(f"[{time.time()}] Session switched from {last_session} to {curr_sess}. Restarting server for new session.\n")
-                    os.system('taskkill /F /IM RemoteMM_Agent.exe /FI "SESSION ne 0" >nul 2>&1')
-                    need_launch = True
-                elif not server_running() and (now - last_launch > 2):
-                    with open(log_file, "a") as f:
-                        f.write(f"[{time.time()}] Server not running in session {curr_sess}. Restarting server.\n")
-                    need_launch = True
-
-                if need_launch:
-                    if launch_server_in_user_session():
-                        last_launch = now
-                        last_session = curr_sess
+            if curr_sess != 0xFFFFFFFF and curr_sess > 0:
+                if curr_sess != stable_session:
+                    if curr_sess == candidate_session:
+                        candidate_count += 1
+                    else:
+                        candidate_session = curr_sess
+                        candidate_count = 1
+                    
+                    if candidate_count >= 5:
+                        try:
+                            with open(log_file, "a") as f:
+                                f.write(f"[{time.time()}] Session switched from {stable_session} to {curr_sess}. Restarting server.\n")
+                        except: pass
+                        stable_session = curr_sess
+                        candidate_count = 0
+                        os.system('taskkill /F /IM RemoteMM_Agent.exe /FI "SESSION ne 0" >nul 2>&1')
+                        time.sleep(1)
+                        if launch_server_in_user_session():
+                            last_launch = now
+                else:
+                    candidate_count = 0
+                    if not server_running() and (now - last_launch > 3):
+                        try:
+                            with open(log_file, "a") as f:
+                                f.write(f"[{time.time()}] Server not running in session {curr_sess}. Restarting server.\n")
+                        except: pass
+                        if launch_server_in_user_session():
+                            last_launch = now
             time.sleep(1)
         except Exception as e:
-            with open(log_file, "a") as f: f.write(f"[{time.time()}] Watchdog error: {e}\n")
+            try:
+                with open(log_file, "a") as f: f.write(f"[{time.time()}] Watchdog error: {e}\n")
+            except: pass
             time.sleep(2)
 
 
@@ -195,77 +376,122 @@ def get_scr():
     h = user32.GetSystemMetrics(1)
     return (w if w > 0 else 1920), (h if h > 0 else 1080)
 
+def get_desk_name(h):
+    if not h: return ''
+    buf = ctypes.create_unicode_buffer(256)
+    need = ctypes.c_ulong()
+    if user32.GetUserObjectInformationW(h, 2, buf, ctypes.sizeof(buf), ctypes.byref(need)):
+        return buf.value
+    return ''
+
+CURRENT_DESK = [None]
 def switch_desktop():
     try:
-        hdesk = user32.OpenInputDesktop(0, False, 0x02000000)
-        if hdesk:
-            user32.SetThreadDesktop(hdesk)
-            user32.CloseDesktop(hdesk)
-            return True
-    except: pass
-    
-    try:
-        hdesk = user32.OpenDesktopW("Winlogon", 0, False, 0x02000000)
-        if hdesk:
-            user32.SetThreadDesktop(hdesk)
-            user32.CloseDesktop(hdesk)
-            return True
+        hwinsta = user32.OpenWindowStationW("WinSta0", False, 0x000F037F)
+        if hwinsta:
+            user32.SetProcessWindowStation(hwinsta)
     except: pass
 
-    try:
-        hdesk = user32.OpenDesktopW("Default", 0, False, 0x02000000)
-        if hdesk:
-            user32.SetThreadDesktop(hdesk)
-            user32.CloseDesktop(hdesk)
-            return True
-    except: pass
-    
+    for desk_name in (None, "Default", "Winlogon"):
+        try:
+            if desk_name is None:
+                hdesk = user32.OpenInputDesktop(0, False, 0x02000000 | 0x0001 | 0x0040)
+            else:
+                hdesk = user32.OpenDesktopW(desk_name, 0, False, 0x02000000 | 0x0001 | 0x0040)
+            if hdesk:
+                user32.SetThreadDesktop(hdesk)
+                if CURRENT_DESK[0] and CURRENT_DESK[0] != hdesk:
+                    try: user32.CloseDesktop(CURRENT_DESK[0])
+                    except: pass
+                CURRENT_DESK[0] = hdesk
+                return True
+        except: pass
     return False
 
-def capture_gdi(quality=65):
+LAST_DESK_CHECK = [0]
+LAST_FRAME_B64 = [None]
+
+def check_and_switch_desktop():
+    """Eger aktif input desktop (ekrandaki goruntu) thread'in desktop'indan farkliysa gecis yapar."""
+    t_now = time.time()
+    if t_now - LAST_DESK_CHECK[0] < 2.0:
+        return False
+    LAST_DESK_CHECK[0] = t_now
     try:
+        h_in = user32.OpenInputDesktop(0, False, 0x02000000 | 0x0001 | 0x0040)
+        if h_in:
+            in_name = get_desk_name(h_in)
+            user32.CloseDesktop(h_in)
+            h_cur = user32.GetThreadDesktop(kernel32.GetCurrentThreadId())
+            cur_name = get_desk_name(h_cur)
+            if in_name and in_name != cur_name:
+                switch_desktop()
+                return True
+    except: pass
+    return False
+
+GDI_CACHE = {'hdc_mem': None, 'hbmp': None, 'w': 0, 'h': 0, 'buf': None, 'bmi': None}
+
+def reset_gdi_cache():
+    if GDI_CACHE['hdc_mem']:
+        try:
+            gdi32.DeleteObject(GDI_CACHE['hbmp'])
+            gdi32.DeleteDC(GDI_CACHE['hdc_mem'])
+        except: pass
+    GDI_CACHE['hdc_mem'] = None
+    GDI_CACHE['hbmp'] = None
+    GDI_CACHE['w'] = 0
+    GDI_CACHE['h'] = 0
+    GDI_CACHE['buf'] = None
+    GDI_CACHE['bmi'] = None
+
+def capture_gdi(quality=78):
+    try:
+        if check_and_switch_desktop():
+            reset_gdi_cache()
+
         from PIL import Image
         w, h = get_scr()
         hdc = user32.GetDC(0)
         if not hdc:
             switch_desktop()
+            reset_gdi_cache()
             hdc = user32.GetDC(0)
-            if not hdc: return None
-        hdc_mem = gdi32.CreateCompatibleDC(hdc)
-        if not hdc_mem:
-            user32.ReleaseDC(0, hdc)
-            return None
-        hbmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
-        if not hbmp:
-            gdi32.DeleteDC(hdc_mem)
-            user32.ReleaseDC(0, hdc)
-            return None
-        hbmp_old = gdi32.SelectObject(hdc_mem, hbmp)
-        ok = gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc, 0, 0, 0x00CC0020)
-        if not ok:
-            switch_desktop()
-            gdi32.SelectObject(hdc_mem, hbmp_old)
-            gdi32.DeleteObject(hbmp); gdi32.DeleteDC(hdc_mem)
-            user32.ReleaseDC(0, hdc)
-            return None
+            if not hdc: return LAST_FRAME_B64[0]
 
-        bmi = BITMAPINFOHEADER()
-        bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-        bmi.biWidth = w; bmi.biHeight = -h
-        bmi.biPlanes = 1; bmi.biBitCount = 32; bmi.biCompression = 0
+        stride = (w * 3 + 3) & ~3
+        if GDI_CACHE['w'] != w or GDI_CACHE['h'] != h or not GDI_CACHE['hdc_mem']:
+            reset_gdi_cache()
+            GDI_CACHE['hdc_mem'] = gdi32.CreateCompatibleDC(hdc)
+            GDI_CACHE['hbmp'] = gdi32.CreateCompatibleBitmap(hdc, w, h)
+            gdi32.SelectObject(GDI_CACHE['hdc_mem'], GDI_CACHE['hbmp'])
+            GDI_CACHE['w'] = w
+            GDI_CACHE['h'] = h
+            GDI_CACHE['buf'] = ctypes.create_string_buffer(stride * h)
+            bmi = BITMAPINFOHEADER()
+            bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.biWidth = w; bmi.biHeight = -h
+            bmi.biPlanes = 1; bmi.biBitCount = 24; bmi.biCompression = 0
+            GDI_CACHE['bmi'] = bmi
 
-        buf = ctypes.create_string_buffer(w * h * 4)
-        gdi32.GetDIBits(hdc_mem, hbmp, 0, h, buf, ctypes.byref(bmi), 0)
-        gdi32.SelectObject(hdc_mem, hbmp_old)
-        gdi32.DeleteObject(hbmp); gdi32.DeleteDC(hdc_mem)
+        # 0x40CC0020 = SRCCOPY (0x00CC0020) | CAPTUREBLT (0x40000000)
+        # CAPTUREBLT sayesinde DWM/DirectX/video ve seffaf katman pencereleri siyah olmadan yakalanir
+        ok = gdi32.BitBlt(GDI_CACHE['hdc_mem'], 0, 0, w, h, hdc, 0, 0, 0x40CC0020)
         user32.ReleaseDC(0, hdc)
+        if not ok:
+            # Video veya DWM pencere gecisinde BitBlt teklemesinde onceki kareyi koru
+            return LAST_FRAME_B64[0]
 
-        img = Image.frombuffer('RGBA', (w, h), buf, 'raw', 'BGRA', 0, 1).convert('RGB')
+        gdi32.GetDIBits(GDI_CACHE['hdc_mem'], GDI_CACHE['hbmp'], 0, h, GDI_CACHE['buf'], ctypes.byref(GDI_CACHE['bmi']), 0)
+
+        img = Image.frombuffer('RGB', (w, h), GDI_CACHE['buf'], 'raw', 'BGR', stride, 1)
         out = io.BytesIO()
-        img.save(out, format='JPEG', quality=quality, optimize=True)
-        return base64.b64encode(out.getvalue()).decode()
+        img.save(out, format='JPEG', quality=quality)
+        frame_b64 = base64.b64encode(out.getvalue()).decode()
+        LAST_FRAME_B64[0] = frame_b64
+        return frame_b64
     except Exception as e:
-        return None
+        return LAST_FRAME_B64[0]
 
 
 # ─── Input ───────────────────────────────────────────────────
@@ -321,6 +547,20 @@ ACTIVE_CLIENTS = []
 CHAT_HISTORY = []
 CHAT_PROC = [None]
 CHAT_LOCK = threading.Lock()
+
+AUDIO_QUEUE = queue.Queue(maxsize=100)
+
+def audio_playback_worker():
+    while True:
+        try:
+            data = AUDIO_QUEUE.get()
+            if data is None: break
+            winsound.PlaySound(data, winsound.SND_MEMORY)
+            AUDIO_QUEUE.task_done()
+        except Exception:
+            pass
+
+threading.Thread(target=audio_playback_worker, daemon=True).start()
 
 HOOKPROC_M = ctypes.WINFUNCTYPE(ctypes.c_longlong, ctypes.c_int, ctypes.c_size_t, ctypes.POINTER(MSLLHOOKSTRUCT))
 HOOKPROC_K = ctypes.WINFUNCTYPE(ctypes.c_longlong, ctypes.c_int, ctypes.c_size_t, ctypes.POINTER(KBDLLHOOKSTRUCT))
@@ -392,7 +632,6 @@ def input_and_curtain_manager():
 
 def ms(flags, dx=0, dy=0, data=0):
     try:
-        switch_desktop()
         user32.SetMessageExtraInfo(MAGIC_REMOTE_TAG)
         i=INP(); i.type=INPUT_MOUSE; i._input.mi=MI()
         i._input.mi.dx=dx; i._input.mi.dy=dy
@@ -404,7 +643,6 @@ def ms(flags, dx=0, dy=0, data=0):
 
 def ks(vk, flags=0):
     try:
-        switch_desktop()
         user32.SetMessageExtraInfo(MAGIC_REMOTE_TAG)
         i=INP(); i.type=INPUT_KEYBOARD; i._input.ki=KI()
         i._input.ki.wVk=vk; i._input.ki.wScan=0
@@ -448,8 +686,20 @@ def do_key(cmd):
         k=cmd.get('key','')
         if not k: return
         if k in ('CAD', '{CAD}'):
+            try:
+                sas = ctypes.windll.LoadLibrary('sas.dll')
+                sas.SendSAS(False)
+            except: pass
             ks(VK_CTRL); ks(VK_ALT); ks(VK_DEL); time.sleep(0.05)
             ks(VK_DEL,KEYEVENTF_KEYUP); ks(VK_ALT,KEYEVENTF_KEYUP); ks(VK_CTRL,KEYEVENTF_KEYUP)
+        elif k in ('UNLOCK', 'DISMISS_LOCK'):
+            try:
+                sas = ctypes.windll.LoadLibrary('sas.dll')
+                sas.SendSAS(False)
+            except: pass
+            ks(VK_RET); time.sleep(0.04); ks(VK_RET, KEYEVENTF_KEYUP)
+            time.sleep(0.04)
+            ks(0x20); time.sleep(0.04); ks(0x20, KEYEVENTF_KEYUP)
         elif k in ('TASK_MGR', '{TASK_MGR}'):
             os.system('start taskmgr.exe')
         elif k in ('WIN_KEY', 'Meta', 'OS', '{WIN}', 'Win'):
@@ -510,12 +760,17 @@ def get_drives():
         drives = ['C:\\']
     return drives or ['C:\\']
 
-SOCKET_LOCK = threading.Lock()
+CONN_SEND_LOCKS = {}
+CONN_SEND_MUTEX = threading.Lock()
 
 def send_json_safe(conn, obj):
     try:
         data = (json.dumps(obj) + '\n').encode('utf-8')
-        with SOCKET_LOCK:
+        with CONN_SEND_MUTEX:
+            if conn not in CONN_SEND_LOCKS:
+                CONN_SEND_LOCKS[conn] = threading.Lock()
+            lk = CONN_SEND_LOCKS[conn]
+        with lk:
             conn.sendall(data)
         return True
     except:
@@ -629,6 +884,76 @@ def handle_task_list(conn):
         send_json_safe(conn, {'type':'TASK_LIST_RES','processes':formatted})
     except: pass
 
+CHAT_IPC_PORT = 6131
+CHAT_IPC_CLIENTS = []
+CHAT_IPC_LOCK = threading.Lock()
+
+def start_chat_ipc_server():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        for _ in range(15):
+            try:
+                s.bind(('127.0.0.1', CHAT_IPC_PORT))
+                break
+            except:
+                time.sleep(0.5)
+        else:
+            return
+        s.listen(5)
+        while True:
+            try:
+                c, _ = s.accept()
+                with CHAT_IPC_LOCK:
+                    CHAT_IPC_CLIENTS.append(c)
+                # Send current chat history immediately to connecting chat UI
+                send_json_safe(c, {'type': 'CHAT_SYNC', 'messages': list(CHAT_HISTORY)})
+                threading.Thread(target=handle_chat_ipc_client, args=(c,), daemon=True).start()
+            except:
+                time.sleep(0.2)
+    except:
+        pass
+
+def handle_chat_ipc_client(conn):
+    buf = ''
+    while True:
+        try:
+            data = conn.recv(4096)
+            if not data: break
+            buf += data.decode('utf-8', errors='ignore')
+            lines = buf.split('\n'); buf = lines.pop()
+            for line in lines:
+                line = line.strip()
+                if not line: continue
+                try: msg = json.loads(line)
+                except: continue
+                if msg.get('type') == 'USER_MESSAGE':
+                    text = msg.get('text', '').strip()
+                    if text:
+                        t_now = msg.get('time', time.strftime('%H:%M:%S'))
+                        try: uname = os.getlogin()
+                        except: uname = 'User'
+                        msg_obj = {
+                            'sender': f'Remote User ({uname})',
+                            'text': text,
+                            'time': t_now
+                        }
+                        CHAT_HISTORY.append(msg_obj)
+                        broadcast_chat()
+                        broadcast_to_chat_ui({'type': 'CHAT_SYNC', 'messages': list(CHAT_HISTORY)})
+        except:
+            break
+    with CHAT_IPC_LOCK:
+        if conn in CHAT_IPC_CLIENTS:
+            CHAT_IPC_CLIENTS.remove(conn)
+    try: conn.close()
+    except: pass
+
+def broadcast_to_chat_ui(payload):
+    with CHAT_IPC_LOCK:
+        for c in list(CHAT_IPC_CLIENTS):
+            send_json_safe(c, payload)
+
 def broadcast_chat():
     payload = {'type': 'CHAT_BROADCAST', 'messages': list(CHAT_HISTORY)}
     with CLIENTS_LOCK:
@@ -636,81 +961,27 @@ def broadcast_chat():
             send_json_safe(c, payload)
 
 def ensure_chat_ui():
-    """Kullanici masaustunde Chat UI penceresini baslatir (calismiyorsa)."""
-    global CHAT_PROC
-    with CHAT_LOCK:
-        if CHAT_PROC[0] and CHAT_PROC[0].poll() is None:
-            try:
-                CHAT_PROC[0].stdin.write(json.dumps({'action': 'show'}) + '\n')
-                CHAT_PROC[0].stdin.flush()
-                return True
-            except: pass
-
-        try:
-            if getattr(sys, 'frozen', False):
-                cmd = [AGENT_PATH, '--chat-ui']
-            else:
-                cmd = [sys.executable, AGENT_PATH, '--chat-ui']
-
-            si = subprocess.STARTUPINFO()
-            si.dwFlags = subprocess.STARTF_USESHOWWINDOW
-            si.wShowWindow = 1 # SW_SHOWNORMAL
-            si.lpDesktop = "WinSta0\\Default"
-
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                startupinfo=si
-            )
-            CHAT_PROC[0] = proc
-
-            def read_chat_stdout():
-                for line in proc.stdout:
-                    line = line.strip()
-                    if not line: continue
-                    try:
-                        data = json.loads(line)
-                        if data.get('type') == 'USER_MESSAGE':
-                            text = data.get('text', '').strip()
-                            if text:
-                                t_str = data.get('time', time.strftime('%H:%M:%S'))
-                                try: uname = os.getlogin()
-                                except: uname = 'User'
-                                msg_obj = {
-                                    'sender': f'Remote User ({uname})',
-                                    'text': text,
-                                    'time': t_str
-                                }
-                                CHAT_HISTORY.append(msg_obj)
-                                broadcast_chat()
-                    except: pass
-
-            threading.Thread(target=read_chat_stdout, daemon=True).start()
+    """Kullanici masaustunde Chat UI penceresini baslatir veya one getirir."""
+    with CHAT_IPC_LOCK:
+        if len(CHAT_IPC_CLIENTS) > 0:
+            broadcast_to_chat_ui({'type': 'SHOW_WINDOW'})
             return True
-        except Exception as e:
-            try:
-                log_file = os.path.join(os.path.dirname(AGENT_PATH), "agent_debug.log")
-                with open(log_file, "a") as f:
-                    f.write(f"[{time.time()}] ensure_chat_ui error: {e}\n")
-            except: pass
-            return False
-
-def send_to_chat_ui(payload):
-    ensure_chat_ui()
-    with CHAT_LOCK:
-        if CHAT_PROC[0] and CHAT_PROC[0].poll() is None:
-            try:
-                CHAT_PROC[0].stdin.write(json.dumps(payload) + '\n')
-                CHAT_PROC[0].stdin.flush()
-            except: pass
+    return launch_chat_in_user_session()
 
 def run_chat_ui():
     import tkinter as tk
     from tkinter import scrolledtext
+
+    # Connect to local agent chat IPC
+    sock = None
+    for _ in range(30):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect(('127.0.0.1', CHAT_IPC_PORT))
+            sock = s
+            break
+        except:
+            time.sleep(0.2)
 
     root = tk.Tk()
     root.title('RemoteMM - Uzak Destek & Operatör Sohbeti')
@@ -763,11 +1034,14 @@ def run_chat_ui():
 
     def on_send():
         val = entry.get().strip()
-        if val:
+        if val and sock:
             entry.delete(0, 'end')
             t_now = time.strftime('%H:%M:%S')
             add_msg('Siz', val, t_now, 'user_hdr')
-            print(json.dumps({'type': 'USER_MESSAGE', 'text': val, 'time': t_now}), flush=True)
+            try:
+                payload = json.dumps({'type': 'USER_MESSAGE', 'text': val, 'time': t_now}) + '\n'
+                sock.sendall(payload.encode('utf-8'))
+            except: pass
 
     entry.bind('<Return>', lambda e: on_send())
 
@@ -775,8 +1049,8 @@ def run_chat_ui():
     btn.pack(side='right')
 
     def handle_incoming(cmd):
-        act = cmd.get('action')
-        if act == 'incoming':
+        t = cmd.get('type')
+        if t == 'CHAT_INCOMING':
             sndr = cmd.get('sender', 'Teknisyen')
             txt_msg = cmd.get('text', '')
             t_str = cmd.get('time', time.strftime('%H:%M:%S'))
@@ -784,33 +1058,101 @@ def run_chat_ui():
             root.deiconify()
             root.lift()
             root.attributes('-topmost', True)
-            root.after(300, lambda: root.attributes('-topmost', False))
+            root.after(400, lambda: root.attributes('-topmost', False))
             entry.focus_set()
             try: user32.MessageBeep(0x00000040)
             except: pass
-        elif act == 'show':
+        elif t == 'CHAT_SYNC':
+            msgs = cmd.get('messages', [])
+            txt.config(state='normal')
+            txt.delete('1.0', 'end')
+            txt.config(state='disabled')
+            add_msg('Sistem', 'Destek oturumu baslatildi. Teknisyene dogrudan buradan cevap yazabilirsiniz.', time.strftime('%H:%M:%S'), 'sys_hdr')
+            for m in msgs:
+                snd = m.get('sender', '')
+                tag = 'tech_hdr' if ('Technician' in snd or 'Teknisyen' in snd) else ('sys_hdr' if ('System' in snd or 'Sistem' in snd) else 'user_hdr')
+                add_msg(snd, m.get('text', ''), m.get('time', ''), tag)
+        elif t == 'SHOW_WINDOW':
             root.deiconify()
             root.lift()
             root.attributes('-topmost', True)
-            root.after(300, lambda: root.attributes('-topmost', False))
+            root.after(400, lambda: root.attributes('-topmost', False))
             entry.focus_set()
-        elif act == 'close':
-            root.destroy()
 
-    def stdin_thread():
-        for line in sys.stdin:
-            line = line.strip()
-            if not line: continue
+    def socket_receiver():
+        nonlocal sock
+        buf = ''
+        while True:
             try:
-                cmd = json.loads(line)
-                root.after(0, lambda c=cmd: handle_incoming(c))
-            except: pass
+                if not sock:
+                    time.sleep(1)
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.connect(('127.0.0.1', CHAT_IPC_PORT))
+                        sock = s
+                    except: continue
+                data = sock.recv(4096)
+                if not data:
+                    sock.close()
+                    sock = None
+                    time.sleep(1)
+                    continue
+                buf += data.decode('utf-8', errors='ignore')
+                lines = buf.split('\n'); buf = lines.pop()
+                for line in lines:
+                    line = line.strip()
+                    if not line: continue
+                    try:
+                        cmd = json.loads(line)
+                        root.after(0, lambda c=cmd: handle_incoming(c))
+                    except: pass
+            except:
+                if sock:
+                    try: sock.close()
+                    except: pass
+                    sock = None
+                time.sleep(1)
 
-    threading.Thread(target=stdin_thread, daemon=True).start()
+    threading.Thread(target=socket_receiver, daemon=True).start()
 
     root.protocol('WM_DELETE_WINDOW', root.withdraw)
-    print(json.dumps({'type': 'READY'}), flush=True)
     root.mainloop()
+
+AGENT_VERSION = 'RemoteMM v4.2'
+
+def do_agent_upgrade(conn, cmd):
+    url = cmd.get('url', '')
+    if not url: return
+    try:
+        import urllib.request
+        send_json_safe(conn, {'type': 'UPGRADE_PROGRESS', 'message': 'Yeni agent sürümü indiriliyor...'})
+        target_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else r'C:\RemoteMM'
+        os.makedirs(target_dir, exist_ok=True)
+        new_exe = os.path.join(target_dir, 'RemoteMM_Agent_new.exe')
+        curr_exe = sys.executable if getattr(sys, 'frozen', False) else os.path.join(target_dir, 'RemoteMM_Agent.exe')
+        
+        # Download new binary
+        urllib.request.urlretrieve(url, new_exe)
+        send_json_safe(conn, {'type': 'UPGRADE_PROGRESS', 'message': 'Yeni sürüm indirildi, yeniden başlatılıyor...'})
+        
+        # Batch updater script that waits 2 seconds, kills current process, overwrites, starts service or exe
+        bat_file = os.path.join(target_dir, 'agent_update.bat')
+        with open(bat_file, 'w', encoding='utf-8') as f:
+            f.write(f'''@echo off
+timeout /t 2 /nobreak >nul
+taskkill /F /IM RemoteMM_Agent.exe >nul 2>&1
+move /Y "{new_exe}" "{curr_exe}" >nul 2>&1
+sc.exe start RemoteMMAgent >nul 2>&1
+if errorlevel 1 (
+    start "" "{curr_exe}"
+)
+del "%~f0"
+''')
+        subprocess.Popen(['cmd.exe', '/c', bat_file], creationflags=0x08000000)
+        time.sleep(0.5)
+        os._exit(0)
+    except Exception as e:
+        send_json_safe(conn, {'type': 'UPGRADE_ERROR', 'message': str(e)})
 
 def handle_client(conn, addr):
     global LOCKED, BLACKOUT
@@ -820,12 +1162,19 @@ def handle_client(conn, addr):
     hostname = socket.gethostname()
     try: uname = os.getlogin()
     except: uname = 'User'
+    try:
+        import uuid
+        mac_num = uuid.getnode()
+        mac_str = ':'.join(f'{(mac_num >> (8 * i)) & 0xff:02x}' for i in reversed(range(6)))
+    except:
+        mac_str = ''
     w, h = get_scr()
     hs = {
         'type': 'HANDSHAKE_ACK',
-        'agentVersion': 'RemoteMM v4.1',
+        'agentVersion': AGENT_VERSION,
         'hostname': hostname,
         'user': uname,
+        'macAddress': mac_str,
         'screenWidth': w,
         'screenHeight': h,
         'os': 'Windows'
@@ -839,8 +1188,8 @@ def handle_client(conn, addr):
     # Send current chat history immediately to connecting technician
     send_json_safe(conn, {'type': 'CHAT_BROADCAST', 'messages': list(CHAT_HISTORY)})
 
-    quality = [65]
-    fps = [0.05]
+    quality = [88]
+    fps = [0.016]
     client_alive = [True]
 
     def stream():
@@ -860,9 +1209,10 @@ def handle_client(conn, addr):
                         'blackedOut': BLACKOUT
                     })
                 elapsed = time.time() - t0
-                time.sleep(max(0.01, fps[0] - elapsed))
+                target_delay = fps[0] if fps[0] > 0 else 0.016
+                time.sleep(max(0.001, target_delay - elapsed))
             except Exception:
-                time.sleep(0.1)
+                time.sleep(0.05)
 
     threading.Thread(target=stream, daemon=True).start()
     buf = ''
@@ -878,8 +1228,8 @@ def handle_client(conn, addr):
                 try: cmd = json.loads(line)
                 except: continue
                 t = cmd.get('type','')
-                if   t=='MOUSE_INPUT':    threading.Thread(target=do_mouse,args=(cmd,),daemon=True).start()
-                elif t=='KEYBOARD_INPUT': threading.Thread(target=do_key,  args=(cmd,),daemon=True).start()
+                if   t=='MOUSE_INPUT':    do_mouse(cmd)
+                elif t=='KEYBOARD_INPUT': do_key(cmd)
                 elif t=='LOCK_INPUT':
                     LOCKED = bool(cmd.get('locked',False))
                 elif t=='BLACKOUT_SCREEN':
@@ -895,23 +1245,43 @@ def handle_client(conn, addr):
                         }
                         CHAT_HISTORY.append(msg_obj)
                         broadcast_chat()
-                        send_to_chat_ui({
-                            'action': 'incoming',
+                        ensure_chat_ui()
+                        broadcast_to_chat_ui({
+                            'type': 'CHAT_INCOMING',
                             'sender': 'Teknisyen',
                             'text': text,
                             'time': t_str
                         })
                 elif t=='CHAT_OPEN':
                     ensure_chat_ui()
-                elif t=='SET_QUALITY': quality[0] = max(20,min(95,int(cmd.get('quality',65))))
-                elif t=='SET_FPS':     fps[0]     = 1.0/max(5,min(60,int(cmd.get('fps',20))))
+                elif t=='SET_QUALITY': quality[0] = max(30,min(95,int(cmd.get('quality',88))))
+                elif t=='SET_FPS':
+                    req_fps = int(cmd.get('fps',0))
+                    fps[0] = 0.016 if (req_fps <= 0 or req_fps >= 60) else (1.0 / max(5, req_fps))
+                elif t=='AUDIO_CHUNK':
+                    try:
+                        raw_b64 = cmd.get('data', '')
+                        if raw_b64:
+                            ab = base64.b64decode(raw_b64)
+                            if not AUDIO_QUEUE.full():
+                                AUDIO_QUEUE.put(ab)
+                    except: pass
+                elif t=='AUDIO_BEEP':
+                    try:
+                        winsound.MessageBeep(0x00000040)
+                    except: pass
                 elif t=='PING':
                     send_json_safe(conn, {'type':'PONG','timestamp':int(time.time()*1000)})
                 elif t=='POWER_ACTION':
+                    enable_shutdown_privilege()
                     a = cmd.get('action','')
-                    if   a=='reboot':   os.system('shutdown /r /t 5')
-                    elif a=='shutdown': os.system('shutdown /s /t 5')
-                    elif a=='logoff':   os.system('logoff')
+                    if   a=='reboot':    os.system('shutdown /r /f /t 1')
+                    elif a=='shutdown':  os.system('shutdown /s /f /t 1')
+                    elif a=='sleep':     os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
+                    elif a=='hibernate': os.system('shutdown /h')
+                    elif a=='lock':      os.system('rundll32.exe user32.dll,LockWorkStation')
+                    elif a=='logoff':    os.system('logoff')
+                    elif a=='abort':     os.system('shutdown /a')
                 elif t.startswith('FS_'):
                     threading.Thread(target=handle_fs, args=(conn, cmd), daemon=True).start()
                 elif t=='TASK_LIST':
@@ -919,6 +1289,8 @@ def handle_client(conn, addr):
                 elif t=='KILL_PROCESS':
                     try: os.system(f'taskkill /F /PID {int(cmd.get("pid",0))}')
                     except: pass
+                elif t=='AGENT_UPGRADE':
+                    threading.Thread(target=do_agent_upgrade, args=(conn, cmd), daemon=True).start()
         except: break
     client_alive[0] = False
     with CLIENTS_LOCK:
@@ -927,10 +1299,70 @@ def handle_client(conn, addr):
     BLACKOUT = False
     conn.close()
 
+def enable_shutdown_privilege():
+    try:
+        advapi32 = ctypes.windll.advapi32
+        SE_SHUTDOWN_NAME = "SeShutdownPrivilege"
+        SE_PRIVILEGE_ENABLED = 0x00000002
+        TOKEN_ADJUST_PRIVILEGES = 0x0020
+        TOKEN_QUERY = 0x0008
+
+        hToken = ctypes.c_void_p()
+        if advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ctypes.byref(hToken)):
+            class LUID(ctypes.Structure):
+                _fields_ = [('LowPart', ctypes.c_ulong), ('HighPart', ctypes.c_long)]
+            class LUID_AND_ATTRIBUTES(ctypes.Structure):
+                _fields_ = [('Luid', LUID), ('Attributes', ctypes.c_ulong)]
+            class TOKEN_PRIVILEGES(ctypes.Structure):
+                _fields_ = [('PrivilegeCount', ctypes.c_ulong), ('Privileges', LUID_AND_ATTRIBUTES * 1)]
+
+            luid = LUID()
+            if advapi32.LookupPrivilegeValueW(None, SE_SHUTDOWN_NAME, ctypes.byref(luid)):
+                tp = TOKEN_PRIVILEGES()
+                tp.PrivilegeCount = 1
+                tp.Privileges[0].Luid = luid
+                tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+                advapi32.AdjustTokenPrivileges(hToken, False, ctypes.byref(tp), 0, None, None)
+            kernel32.CloseHandle(hToken)
+    except:
+        pass
+
+def configure_system_for_wol_and_power():
+    """
+    Her PC ve Windows Server'da Wake-on-LAN ve Guc Yonetiminin
+    kesin ve hatasiz calismasini saglamak icin Windows ayarlarini optimize eder:
+    1. Windows Hizli Baslatma (Hiberboot) kapatilir (NIC S5 durumunda uyanabilsin).
+    2. Ag bagdastiricilarinda Magic Packet ile uyandirma (WakeOnMagicPacket) acilir.
+    3. Windows Guvenlik Duvari'nda WoL portlari (UDP 7, 9) ve Agent portu (TCP 6129) acilir.
+    """
+    try:
+        # 1. Hiberboot kapatma (Fast Startup kapali olmali, yoksa WoL calismaz)
+        os.system('reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f >nul 2>&1')
+        
+        # 2. Ag Kartlarinda Wake-on-LAN'i PowerShell ile etkinlestir
+        ps_wol = (
+            "$ErrorActionPreference = 'SilentlyContinue'; "
+            "Get-NetAdapter | ForEach-Object { "
+            "  Enable-NetAdapterPowerManagement -Name $_.Name -WakeOnMagicPacket; "
+            "  Set-NetAdapterPowerManagement -Name $_.Name -WakeOnMagicPacket $true; "
+            "  Set-NetAdapterAdvancedProperty -Name $_.Name -DisplayName '*Wake on Magic Packet*' -DisplayValue 'Enabled'; "
+            "  Set-NetAdapterAdvancedProperty -Name $_.Name -DisplayName '*Wake on Pattern*' -DisplayValue 'Enabled'; "
+            "  Set-NetAdapterAdvancedProperty -Name $_.Name -DisplayName '*Shutdown Wake-Up*' -DisplayValue 'Enabled'; "
+            "}"
+        )
+        cmd_enc = base64.b64encode(ps_wol.encode('utf-16le')).decode('ascii')
+        os.system(f'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {cmd_enc} >nul 2>&1')
+        
+        # 3. Guvenlik Duvari Kurallari
+        os.system('netsh advfirewall firewall add rule name="RemoteMM_WoL_In" dir=in action=allow protocol=UDP localport=7,9 >nul 2>&1')
+        os.system(f'netsh advfirewall firewall add rule name="RemoteMMAgent" dir=in action=allow protocol=TCP localport={PORT} >nul 2>&1')
+    except:
+        pass
+
 def start_server():
-    os.system('netsh advfirewall firewall delete rule name=RemoteMMAgent >nul 2>&1')
-    os.system(f'netsh advfirewall firewall add rule name=RemoteMMAgent dir=in action=allow protocol=TCP localport={PORT} >nul 2>&1')
+    threading.Thread(target=configure_system_for_wol_and_power, daemon=True).start()
     threading.Thread(target=input_and_curtain_manager, daemon=True).start()
+    threading.Thread(target=start_chat_ipc_server, daemon=True).start()
     srv = socket.socket()
     for _ in range(15):
         try:
@@ -1005,6 +1437,7 @@ if __name__ == '__main__':
         elif '--server' in sys.argv:
             start_server()
         else:
+            enable_all_privileges()
             try_run_as_service()
             curr_sess = ctypes.c_ulong()
             kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(), ctypes.byref(curr_sess))

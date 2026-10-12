@@ -2,6 +2,7 @@ import { exec } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
+import net from 'net';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -24,31 +25,48 @@ function run(cmd, timeout = 30000) {
   });
 }
 
-async function portOpenPs(host, port) {
-  const r = await run(
-    `powershell -NoProfile -Command "Test-NetConnection -ComputerName ${host} -Port ${port} -InformationLevel Quiet -WarningAction SilentlyContinue"`,
-    8000
-  );
-  return r.out.trim().toLowerCase() === 'true';
+function checkPortOpen(host, port, timeout = 1200) {
+  return new Promise(resolve => {
+    const s = new net.Socket();
+    s.setTimeout(timeout);
+    s.once('connect', () => { s.destroy(); resolve(true); });
+    s.once('timeout', () => { s.destroy(); resolve(false); });
+    s.once('error', () => { s.destroy(); resolve(false); });
+    try {
+      s.connect(port, host);
+    } catch (e) {
+      resolve(false);
+    }
+  });
 }
 
 // Birden fazla kullanici formatiyla SMB C$ bagla
-async function smbConnect(host, username, password) {
+async function smbConnect(host, domain, username, password) {
   const pw = password ? `"${password.replace(/"/g, '')}"` : '""';
-  const formats = [username, `.\\${username}`, `${host}\\${username}`];
+  const formats = [
+    username,
+    domain && domain !== 'WORKGROUP' ? `${domain}\\${username}` : null,
+    `.\\${username}`,
+    `${host}\\${username}`
+  ].filter(Boolean);
 
   for (const u of formats) {
-    await run(`net use \\\\${host}\\C$ /delete /y`);
-    await new Promise(r => setTimeout(r, 300));
+    await run(`net use \\\\${host}\\C$ /delete /y`, 5000);
+    await new Promise(r => setTimeout(r, 200));
     const r = await run(`net use \\\\${host}\\C$ ${pw} /USER:${u} /y`, 12000);
     if (r.ok) return { ok: true, user: u };
+  }
+  // Try without password if not connected
+  if (!password) {
+    const r = await run(`net use \\\\${host}\\C$ /y`, 8000);
+    if (r.ok) return { ok: true, user: 'current_user' };
   }
   return { ok: false };
 }
 
 export async function pushDeployAgent({
   targetHost, domain = 'WORKGROUP', username = 'Administrator',
-  password = '', port = 6129, onProgress
+  password = '', port = 6129, force = false, onProgress
 }) {
   const log = msg => { console.log(`[Deployer] ${msg}`); onProgress?.(msg); };
   const src = path.join(__dirname, '..', 'public', AGENT_EXE);
@@ -60,8 +78,29 @@ export async function pushDeployAgent({
   const remoteArgs = [targetHostParam, credsParam].filter(Boolean).join(' ');
   const remotePrefix = remoteArgs ? `${remoteArgs} ` : '';
 
-  // ── 1. SMB veya Yerel Kopyalama ───────────────────────────
-  log(`📡 Adım 1: Bağlantı yöntemi belirleniyor...`);
+  // ── 1. Eski Surecleri ve Servisleri Durdur (Kilitli Dosyayi Coz) ──
+  log(`🛑 Adım 1: Mevcut süreç ve servis durduruluyor...`);
+  if (isLocal) {
+    await run(`sc.exe stop DWRCS`, 3000);
+    await run(`sc.exe config DWRCS start= disabled`, 3000);
+    await run(`sc.exe stop ${TASK_NAME}`, 5000);
+    await run(`powershell -NoProfile -Command "Stop-Process -Name RemoteMM_Agent -Force -ErrorAction SilentlyContinue"`, 5000);
+  } else {
+    await run(`sc.exe \\\\${targetHost} stop DWRCS`, 3000);
+    await run(`sc.exe \\\\${targetHost} config DWRCS start= disabled`, 3000);
+    await run(`sc.exe \\\\${targetHost} stop ${TASK_NAME}`, 5000);
+    // Remote taskkill attempt
+    if (pw) {
+      await run(`taskkill /S ${targetHost} /U "${username}" /P "${pw}" /F /IM ${AGENT_EXE}`, 5000);
+    } else {
+      await run(`taskkill /S ${targetHost} /F /IM ${AGENT_EXE}`, 5000);
+    }
+  }
+  await run(`schtasks /delete ${remotePrefix}/tn "${TASK_NAME}" /f`, 10000);
+  await new Promise(r => setTimeout(r, 600));
+
+  // ── 2. SMB veya Yerel Kopyalama ───────────────────────────
+  log(`📡 Adım 2: Dosya kopyalama yöntemi belirleniyor...`);
   let canDirectCopy = false;
 
   if (isLocal) {
@@ -69,7 +108,7 @@ export async function pushDeployAgent({
     canDirectCopy = true;
   } else {
     log(`📡 SMB C$ bağlantısı deneniyor...`);
-    const smb = await smbConnect(targetHost, username, pw);
+    const smb = await smbConnect(targetHost, domain, username, pw);
     if (smb.ok) {
       log(`✅ SMB bağlandı (${smb.user}) — C$ erişimi var.`);
       canDirectCopy = true;
@@ -78,23 +117,17 @@ export async function pushDeployAgent({
     }
   }
 
-  // ── 2. Eski gorevi sil ─────────────────────────────────────
-  log(`🛑 Adım 2: Eski görev siliniyor...`);
-  await run(`schtasks /delete ${remotePrefix}/tn "${TASK_NAME}" /f`, 15000);
-  await new Promise(r => setTimeout(r, 600));
-
   // ── 3. EXE kopyala veya HTTP ile indir ────────────────────
   if (canDirectCopy) {
-    log(`📋 Adım 3: Agent doğrudan kopyalanıyor → ${REMOTE_EXE}`);
+    log(`📋 Adım 3: Agent kopyalanıyor → ${REMOTE_EXE}`);
     if (isLocal) {
-      await run(`powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '${REMOTE_DIR}' | Out-Null; Copy-Item -Path '${src.replace(/'/g, "''")}' -Destination '${REMOTE_EXE}' -Force"`);
+      await run(`powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '${REMOTE_DIR}' | Out-Null; if (Test-Path '${REMOTE_EXE}') { Remove-Item '${REMOTE_EXE}.old' -Force -ErrorAction SilentlyContinue; Rename-Item '${REMOTE_EXE}' '${AGENT_EXE}.old' -Force -ErrorAction SilentlyContinue }; Copy-Item -Path '${src.replace(/'/g, "''")}' -Destination '${REMOTE_EXE}' -Force"`);
     } else {
       const unc = UNC_DIR(targetHost);
-      await run(`powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '${unc}' | Out-Null"`);
-      await run(`powershell -NoProfile -ExecutionPolicy Bypass -Command "Copy-Item -Path '${src.replace(/'/g, "''")}' -Destination '${unc}\\${AGENT_EXE}' -Force"`, 20000);
+      await run(`powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path '${unc}' | Out-Null; if (Test-Path '${unc}\\${AGENT_EXE}') { Remove-Item '${unc}\\${AGENT_EXE}.old' -Force -ErrorAction SilentlyContinue; Rename-Item '${unc}\\${AGENT_EXE}' '${AGENT_EXE}.old' -Force -ErrorAction SilentlyContinue }; Copy-Item -Path '${src.replace(/'/g, "''")}' -Destination '${unc}\\${AGENT_EXE}' -Force"`, 25000);
     }
   } else {
-    log(`ℹ️ Adım 3: SMB başarısız. HTTP üzerinden agent indirme komutu gönderiliyor...`);
+    log(`ℹ️ Adım 3: HTTP üzerinden agent indirme komutu gönderiliyor...`);
     let localIp = '127.0.0.1';
     const cands = [];
     for (const iface of Object.values(os.networkInterfaces())) {
@@ -130,11 +163,14 @@ export async function pushDeployAgent({
   if (!isLocal) {
     await run(`sc.exe \\\\${targetHost} create ${TASK_NAME} binPath= "${REMOTE_EXE}" start= auto DisplayName= "RemoteMM Support Agent"`, 10000);
     await run(`sc.exe \\\\${targetHost} config ${TASK_NAME} binPath= "${REMOTE_EXE}" start= auto`, 10000);
+    await run(`sc.exe \\\\${targetHost} failure ${TASK_NAME} reset= 0 actions= restart/2000/restart/5000/restart/10000`, 10000);
   } else {
     await run(`sc.exe create ${TASK_NAME} binPath= "${REMOTE_EXE}" start= auto DisplayName= "RemoteMM Support Agent"`, 10000);
+    await run(`sc.exe config ${TASK_NAME} binPath= "${REMOTE_EXE}" start= auto`, 10000);
+    await run(`sc.exe failure ${TASK_NAME} reset= 0 actions= restart/2000/restart/5000/restart/10000`, 10000);
   }
 
-  // ── 5. Servisi Hemen Calistir ───────────────────────────────
+  // ── 5. Servisi Başlat ───────────────────────────────────────
   log(`🚀 Adım 5: Servis başlatılıyor...`);
   const scStart = isLocal
     ? await run(`sc.exe start ${TASK_NAME}`, 10000)
@@ -143,23 +179,42 @@ export async function pushDeployAgent({
   if (scStart.ok) {
     log(`✅ Windows Servisi başarıyla başlatıldı!`);
   } else {
-    log(`ℹ️ Servis başlatma bildirimi: ${(scStart.out || scStart.err).trim().split('\n')[0] || 'SCM tetiklendi'}`);
-    // Fallback: schtasks
+    log(`ℹ️ Servis bildirimi: ${(scStart.out || scStart.err).trim().split('\n')[0] || 'SCM tetiklendi'}`);
+    
+    // Fallback A: schtasks
     await run(`schtasks /create ${remotePrefix}/tn "${TASK_NAME}" /tr "${REMOTE_EXE}" /sc ONSTART /ru "SYSTEM" /rl HIGHEST /f`, 10000);
     await run(`schtasks /run ${remotePrefix}/tn "${TASK_NAME}"`, 10000);
+
+    // Fallback B: If local, launch process directly
+    if (isLocal) {
+      log(`🚀 Yerel süreç doğrudan başlatılıyor...`);
+      run(`powershell -NoProfile -Command "Start-Process '${REMOTE_EXE}'"`);
+    } else {
+      // Remote WMIC process start fallback
+      const userArg = pw ? `/user:"${username}" /password:"${pw}"` : '';
+      await run(`wmic /node:"${targetHost}" ${userArg} process call create "${REMOTE_EXE}"`, 10000);
+    }
   }
 
-  // ── 6. Port Dogrula ────────────────────────────────────────
+  // ── 6. Port Dogrula (Native Node.js Socket ile Hızlı Kontrol) ──
   log(`🔍 Adım 6: Port ${port} bekleniyor...`);
-  for (let i = 0; i < 12; i++) {
-    await new Promise(r => setTimeout(r, 3000));
-    if (await portOpenPs(targetHost, port)) {
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 600));
+    if (await checkPortOpen(targetHost, port)) {
       log(`✅ Port ${port} açık — agent hazır!`);
       return { success: true };
     }
-    log(`⏳ Başlatılıyor... (${i + 1}/12)`);
+    if ((i + 1) % 4 === 0) {
+      log(`⏳ Agent başlatılıyor... (${Math.round((i + 1) / 2)}s)`);
+    }
   }
 
-  log(`❌ Port açılmadı. Uzak makinede "${REMOTE_EXE}" komutunu elle çalıştırın.`);
+  // Son kontrol
+  if (await checkPortOpen(targetHost, port)) {
+    log(`✅ Port ${port} açık — agent hazır!`);
+    return { success: true };
+  }
+
+  log(`❌ Port açılmadı. Hedef makinede "${REMOTE_EXE}" komutunu kontrol edin.`);
   return { success: false };
 }
